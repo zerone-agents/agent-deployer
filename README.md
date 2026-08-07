@@ -1,15 +1,35 @@
-# agent-deployer
+<div align="center">
 
-A service that manages the lifecycle of [open-agent-runtime](../open-agent-runtime) Docker containers.
-It exposes a REST API for creating, inspecting, stopping, restarting, and deleting agent containers,
-ensuring a single instance per `agent.name` and mounting the right config, sessions, and skills into
-each container.
+# Zerone Agent Deployer
+
+**Lifecycle manager for [agent-runtime](https://github.com/zerone-agents/agent-runtime) Docker containers.**<br/>
+Expose a REST API to create, inspect, stop, restart, and delete agent containers —
+one instance per `agent.name`, with the right config, sessions, and skills mounted in.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](./LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/zerone-agents/agent-deployer?style=flat)](https://github.com/zerone-agents/agent-deployer/stargazers)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Docker](https://img.shields.io/badge/Docker-required-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+
+[Quick Start](#quick-start) · [API](#api-reference) · [Configuration](#environment-variables) · [License](#license)
+
+**English | [简体中文](README.zh-CN.md)**
+
+</div>
+
+---
+
+## What is Zerone Agent Deployer?
+
+Zerone Agent Deployer is the orchestration layer for AI agent containers — a small Go HTTP service that talks to the host Docker daemon and manages one container per declared agent. It serializes the request payload into `agents.yaml` (the contract consumed by [`agent-runtime`](https://github.com/zerone-agents/agent-runtime)), downloads and verifies declared skill archives, and bind-mounts the right config / sessions / skills paths into each container.
+
+**Single-instance enforcement · archive-based skills · full audit via Docker labels.**
 
 ## How it works
 
 ```
 ┌──────────────┐   HTTP    ┌──────────────────────┐   Docker API   ┌─────────────────┐
-│  middle-     │ ────────▶ │  agent-deployer │ ─────────────▶ │  Docker Engine  │
+│  middle-     │ ────────▶ │  agent-deployer      │ ─────────────▶ │  Docker Engine  │
 │  ground /    │           │  (this service)      │                │  (host daemon)  │
 │  any client  │ ◀──────── │                      │ ◀───────────── │                  │
 └──────────────┘   JSON    └──────────┬───────────┘                └─────────────────┘
@@ -24,19 +44,15 @@ each container.
                               └────────────────────┘
 ```
 
-- The deployer itself runs in a container and controls the **host Docker daemon** via
-  `/var/run/docker.sock`.
+- The deployer itself runs in a container and controls the **host Docker daemon** via `/var/run/docker.sock`.
 - Each managed runtime container receives:
-  - `agents/<name>/agents.yaml` → bind-mounted to `/app/config` (read by the runtime
-    image's default CMD via `--config /app/config`)
+  - `agents/<name>/agents.yaml` → bind-mounted to `/app/config` (read by the runtime image's default CMD via `--config /app/config`)
   - `sessions/<name>/` → bind-mounted to `/root/.agents` (session persistence)
   - `skills/` → copied into container at `/workdir/.agents/skills/` via `docker cp` (only when the agent declares skills)
 - The `provider` part of the request is injected as `ZERONE_AGENT_*` environment variables.
-- Singleton enforcement uses Docker labels (`agent-deployer/managed`,
-  `agent-deployer/agent.name`). Each create also stamps a unique
-  `agent-deployer/agent.instance-id` for future HA scenarios.
+- Singleton enforcement uses Docker labels (`agent-deployer/managed`, `agent-deployer/agent.name`). Each create also stamps a unique `agent-deployer/agent.instance-id` for future HA scenarios.
 
-## Quick start
+## Quick Start
 
 ```bash
 # 1. Build and run via docker compose
@@ -133,15 +149,15 @@ All endpoints are under `/api/v1`. Responses use a standard envelope:
     "maxTurns": null,                      // null = unlimited (default)
     "permissionMode": "auto",              // optional
     "tools": ["Read", "Write", "Edit"],    // optional
-    "skills": [                             // optional: skill zip archives to download and inject into the container
+    "skills": [                            // optional: skill zip archives to download and inject into the container
       {
-        "name": "code-review",              // must match [A-Za-z0-9._-]{1,64}
+        "name": "code-review",             // must match [A-Za-z0-9._-]{1,64}
         "url": "https://example.com/skills/code-review.zip",
         "hash": "sha256:535c085bbb8d31d9d3ea2e0a1eb1f0eb22fa5b6ddc46b67ebc9433a7d35d1d4f"
       }
     ],
-    "settingSources": ["project", "user"],  // optional: runtime filesystem scan sources; defaults to ["project"] when omitted
-    "datasets": {                             // optional: dataset_id -> dataset_description map, written to agents.yaml
+    "settingSources": ["project", "user"], // optional: runtime filesystem scan sources; defaults to ["project"] when omitted
+    "datasets": {                          // optional: dataset_id -> dataset_description map, written to agents.yaml
       "dataset-1": "Primary dataset for code generation",
       "dataset-2": "Secondary dataset for testing"
     },
@@ -156,7 +172,7 @@ All endpoints are under `/api/v1`. Responses use a standard envelope:
     ]
   },
   "provider": {
-    "protocol": "anthropic-messages",       // "anthropic-messages" | "openai-completions"
+    "protocol": "anthropic-messages",      // "anthropic-messages" | "openai-completions"
     "baseUrl": "https://api.anthropic.com",
     "lockedApiKey": "sk-ant-xxx"
   },
@@ -172,24 +188,17 @@ All endpoints are under `/api/v1`. Responses use a standard envelope:
 | `provider.baseUrl` | `ZERONE_AGENT_BASE_URL` |
 | `provider.protocol` | `ZERONE_AGENT_API_TYPE` |
 | `agent.model` | `ZERONE_AGENT_MODEL` |
-| `runtime_token`(required) | `ZERONE_AGENT_HTTP_API_KEY` — supplied by the caller in the Create request. The deployer does NOT generate or persist it, so clients must manage and rotate it themselves |
+| `runtime_token` (required) | `ZERONE_AGENT_HTTP_API_KEY` — supplied by the caller in the Create request. The deployer does NOT generate or persist it, so clients must manage and rotate it themselves. |
 
 ## Skills
 
 `agent.skills` and `agent.settingSources` work together:
 
-- `agent.skills` is a list of skill zip archives to download. Each is
-  downloaded, hash-verified, and extracted into the per-agent skills directory
-  (`$DATA_DIR/<agentName>/skills/<skill>/`) before the runtime container starts.
-- After container creation, skills are **copied** into the container at
-  `/workdir/.agents/skills/` via `docker cp` (not bind-mounted). This gives the
-  runtime its own writable project-level skills directory.
-- `agent.settingSources` tells the runtime which filesystem locations to scan
-  for skills (e.g. `project`, `user`). **Defaults to `["project"]` when
-  omitted.** Pass an explicit list to override.
+- `agent.skills` is a list of skill zip archives to download. Each is downloaded, hash-verified, and extracted into the per-agent skills directory (`$DATA_DIR/<agentName>/skills/<skill>/`) before the runtime container starts.
+- After container creation, skills are **copied** into the container at `/workdir/.agents/skills/` via `docker cp` (not bind-mounted). This gives the runtime its own writable project-level skills directory.
+- `agent.settingSources` tells the runtime which filesystem locations to scan for skills (e.g. `project`, `user`). **Defaults to `["project"]` when omitted.** Pass an explicit list to override.
 
-The generated `agents.yaml` does **not** include a `skills` whitelist — the
-runtime auto-discovers all skills under the scanned directories.
+The generated `agents.yaml` does **not** include a `skills` whitelist — the runtime auto-discovers all skills under the scanned directories.
 
 | Field | Description |
 |---|---|
@@ -203,15 +212,9 @@ runtime auto-discovers all skills under the scanned directories.
 | `agent.settingSources` | `settingSources: [<source>, ...]` | Filesystem scan sources (default: `["project"]`) |
 | `agent.datasets` | `datasets: {<id>: <description>, ...}` | Optional dataset catalog written to agents.yaml |
 
-The deployer caches each skill by hash: a subsequent Create with the same hash
-skips download. A different hash triggers delete + re-download. The downloaded
-bytes are verified against `hash` to detect tampering or corruption. Zip slip
-paths, oversize entries, and excessive file counts are rejected. The installer
-does not inspect the archive's layout: the zip is extracted verbatim into
-`skills/<name>/`, preserving whatever structure the publisher shipped.
+The deployer caches each skill by hash: a subsequent Create with the same hash skips download. A different hash triggers delete + re-download. The downloaded bytes are verified against `hash` to detect tampering or corruption. Zip slip paths, oversize entries, and excessive file counts are rejected. The installer does not inspect the archive's layout: the zip is extracted verbatim into `skills/<name>/`, preserving whatever structure the publisher shipped.
 
-Limits (hard-coded): zip ≤ 100 MB, single entry ≤ 50 MB, total extracted ≤ 200 MB,
-≤ 1000 entries, download timeout 60 s.
+Limits (hard-coded): zip ≤ 100 MB, single entry ≤ 50 MB, total extracted ≤ 200 MB, ≤ 1000 entries, download timeout 60 s.
 
 ## Development
 
@@ -254,16 +257,11 @@ Dockerfile                      # Multi-stage build for the deployer image
 
 ## Design notes
 
-- **Singleton key**: `agent.name`. The deployer sanitizes the name (lowercase, `[a-z0-9-]`) once
-  and uses that sanitized value consistently for Docker labels, filesystem paths, and the YAML
-  `id`/`name`. `POST /agents` is idempotent for the same name unless `force: true` is sent.
-- **Instance IDs**: every container gets a short random instance ID label
-  (`agent-deployer/agent.instance-id`) so future HA / multi-instance modes can coexist with
-  the current single-instance-per-name model.
-- **Persistence**: all state lives under `$AGENT_DEPLOYER_DATA_DIR` on the host and is bind-mounted
-  into both the deployer container and each runtime container at identical paths. No named Docker
-  volumes are used.
-- **Delete is idempotent**: `DELETE /agents/:name` returns 200 even if the container is already gone.
-  The default behavior archives the agent (container removed, data preserved) so it can still be
-  discovered via `GET /agents?includeArchived=true`. Use `?purge=true` to also remove the on-disk
-  agent and session directories.
+- **Singleton key**: `agent.name`. The deployer sanitizes the name (lowercase, `[a-z0-9-]`) once and uses that sanitized value consistently for Docker labels, filesystem paths, and the YAML `id`/`name`. `POST /agents` is idempotent for the same name unless `force: true` is sent.
+- **Instance IDs**: every container gets a short random instance ID label (`agent-deployer/agent.instance-id`) so future HA / multi-instance modes can coexist with the current single-instance-per-name model.
+- **Persistence**: all state lives under `$AGENT_DEPLOYER_DATA_DIR` on the host and is bind-mounted into both the deployer container and each runtime container at identical paths. No named Docker volumes are used.
+- **Delete is idempotent**: `DELETE /agents/:name` returns 200 even if the container is already gone. The default behavior archives the agent (container removed, data preserved) so it can still be discovered via `GET /agents?includeArchived=true`. Use `?purge=true` to also remove the on-disk agent and session directories.
+
+## License
+
+[MIT](./LICENSE) © zerone-agents
