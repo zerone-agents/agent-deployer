@@ -1,0 +1,26 @@
+services:
+  agent-deployer:
+    build: .
+    image: agent-deployer:latest
+    container_name: agent-deployer
+    restart: unless-stopped
+    ports:
+      - "${AGENT_DEPLOYER_HOST_PORT:-8080}:8080"
+    environment:
+      - AGENT_DEPLOYER_DATA_DIR=/var/lib/agent-deployer
+      - AGENT_DEPLOYER_PORT=8080
+      - AGENT_DEPLOYER_RUNTIME_IMAGE=${AGENT_DEPLOYER_RUNTIME_IMAGE:-open-agent-runtime:latest}
+      - AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT=3000
+      # Per-container resource limits (defaults: 2 CPU cores, 2048 MB memory)
+      # - AGENT_DEPLOYER_CONTAINER_CPUS=2
+      # - AGENT_DEPLOYER_CONTAINER_MEMORY=2048
+      # Set a deployer API key to require authentication on all /api/v1/* endpoints.
+      # When empty (default), auth is disabled — fine for local dev, not for production.
+      # - AGENT_DEPLOYER_API_KEY=change-me
+    volumes:
+      # Control the host Docker daemon from inside the deployer
+      - /var/run/docker.sock:/var/run/docker.sock
+      # All persistent state (agent configs, sessions, skills) lives here.
+      # Bind-mounted at the same path inside the deployer and inside each
+      # managed runtime container so paths are consistent across the boundary.
+      - ${AGENT_DEPLOYER_DATA_DIR:-/var/lib/agent-deployer}:/var/lib/agent-deployer

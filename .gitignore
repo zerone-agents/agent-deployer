@@ -1,0 +1,36 @@
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+agent-deployer
+/server
+/server.exe
+
+# Test / coverage
+*.test
+*.out
+coverage.txt
+
+# Local data directory used during development
+.data/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads
+.zerone-uploads/
+
+.superpowers
+
+# Development process docs (specs/plans) — local only, not tracked
+docs/superpowers/
+
