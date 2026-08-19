@@ -21,6 +21,7 @@ func TestCreateAgentRequest_Validate_ValidRequest(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			MaxTurns:     nil,
@@ -55,6 +56,7 @@ func TestCreateAgentRequest_Validate_MissingAgentName(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -75,6 +77,7 @@ func TestCreateAgentRequest_Validate_MissingAgentModel(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -91,10 +94,53 @@ func TestCreateAgentRequest_Validate_MissingAgentModel(t *testing.T) {
 	assert.Contains(t, err.Error(), "model is required")
 }
 
+func TestCreateAgentRequest_Validate_MissingAgentDescription(t *testing.T) {
+	req := CreateAgentRequest{
+		Agent: AgentDefinition{
+			Name:         "coder",
+			Description:  "",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+		},
+		Provider: ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-ant-xxx",
+		},
+		RuntimeToken: "test-token",
+	}
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "description is required")
+}
+
+func TestCreateAgentRequest_Validate_WhitespaceOnlyDescription(t *testing.T) {
+	req := CreateAgentRequest{
+		Agent: AgentDefinition{
+			Name:         "coder",
+			Description:  "   ",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+		},
+		Provider: ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-ant-xxx",
+		},
+		RuntimeToken: "test-token",
+	}
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "description is required")
+}
+
 func TestCreateAgentRequest_Validate_MissingSystemPrompt(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "",
 		},
@@ -115,6 +161,7 @@ func TestCreateAgentRequest_Validate_InvalidProviderProtocol(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -135,6 +182,7 @@ func TestCreateAgentRequest_Validate_SubagentMissingName(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Subagents: []SubagentDefinition{
@@ -163,6 +211,7 @@ func TestCreateAgentRequest_Validate_SubagentMissingDescription(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Subagents: []SubagentDefinition{
@@ -191,6 +240,7 @@ func TestCreateAgentRequest_Validate_SubagentMissingPrompt(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Subagents: []SubagentDefinition{
@@ -226,6 +276,7 @@ func TestCreateAgentRequest_Validate_MaxTurnsZeroIsValid(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			MaxTurns:     intPtr(0),
@@ -246,6 +297,7 @@ func TestAgentDefinition_Validate_DuplicateSubagentNames(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Subagents: []SubagentDefinition{
@@ -278,6 +330,7 @@ func TestCreateAgentRequest_Validate_OpenAIProtocol(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "gpt-4",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -297,6 +350,7 @@ func TestCreateAgentRequest_Validate_MissingProviderBaseURL(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -317,6 +371,7 @@ func TestCreateAgentRequest_Validate_MissingProviderAPIKey(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -335,6 +390,7 @@ func TestCreateAgentRequest_Validate_WhitespaceOnlyName(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "   ",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -355,6 +411,7 @@ func TestCreateAgentRequest_Validate_MultipleSubagentsOneInvalid(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Subagents: []SubagentDefinition{
@@ -565,6 +622,7 @@ func TestCreateAgentRequest_JSONUnmarshal_RuntimeToken(t *testing.T) {
 	jsonData := `{
 		"agent": {
 			"name": "coder",
+			"description": "Writes and edits code",
 			"model": "claude-sonnet-4-6",
 			"systemPrompt": "You are a coding assistant."
 		},
@@ -588,6 +646,7 @@ func TestCreateAgentRequest_JSONUnmarshal_MaxTurnsZero(t *testing.T) {
 	jsonData := `{
 		"agent": {
 			"name": "coder",
+			"description": "Writes and edits code",
 			"model": "claude-sonnet-4-6",
 			"systemPrompt": "You are a coding assistant.",
 			"maxTurns": 0
@@ -918,6 +977,7 @@ func TestAgentDefinition_Validate_ValidMcpServers(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			McpServers: map[string]McpServerConfig{
@@ -945,6 +1005,7 @@ func TestAgentDefinition_Validate_InvalidMcpType(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			McpServers: map[string]McpServerConfig{
@@ -1035,6 +1096,7 @@ func TestAgentDefinition_Validate_DatasetsValid(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Datasets: map[string]string{
@@ -1057,6 +1119,7 @@ func TestAgentDefinition_Validate_DatasetsEmptyID(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Datasets: map[string]string{
@@ -1080,6 +1143,7 @@ func TestAgentDefinition_Validate_DatasetsEmptyDescription(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Datasets: map[string]string{
@@ -1103,6 +1167,7 @@ func TestAgentDefinition_Validate_DatasetsWhitespaceDescription(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Datasets: map[string]string{
@@ -1357,6 +1422,7 @@ func TestCreateAgentRequest_Validate_InvalidAigc(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -1378,6 +1444,7 @@ func TestCreateAgentRequest_Validate_RuntimeTokenRequired(t *testing.T) {
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -1398,6 +1465,7 @@ func TestCreateAgentRequest_Validate_RuntimeTokenLeadingWhitespace(t *testing.T)
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -1418,6 +1486,7 @@ func TestCreateAgentRequest_Validate_RuntimeTokenTrailingWhitespace(t *testing.T
 	req := CreateAgentRequest{
 		Agent: AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
