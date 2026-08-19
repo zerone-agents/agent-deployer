@@ -100,6 +100,7 @@ func validRequest() *model.CreateAgentRequest {
 	return &model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -291,6 +292,7 @@ func TestAgentService_Create_InvalidRequest(t *testing.T) {
 	// Missing required Name.
 	req := &model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},

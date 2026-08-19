@@ -145,6 +145,7 @@ func validRequestBody() []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -212,6 +213,7 @@ func TestCreateAgent_AcceptsRuntimeToken(t *testing.T) {
 	req := model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 		},
@@ -419,6 +421,7 @@ func TestCreateAgent_400_MissingFields(t *testing.T) {
 	body, _ := json.Marshal(model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			SystemPrompt: "You are a coding assistant.",
 		},
 		Provider: model.ProviderConfig{
@@ -641,6 +644,7 @@ func TestAgentHandler_Create_SkillHashMismatch_Returns422(t *testing.T) {
 	body, _ := json.Marshal(model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Skills: []model.SkillSource{
@@ -691,6 +695,7 @@ func TestAgentHandler_Create_SkillDownloadFailed_Returns502(t *testing.T) {
 	body, _ := json.Marshal(model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "claude-sonnet-4-6",
 			SystemPrompt: "You are a coding assistant.",
 			Skills: []model.SkillSource{
@@ -727,6 +732,7 @@ func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	body, _ := json.Marshal(model.CreateAgentRequest{
 		Agent: model.AgentDefinition{
 			Name:         "coder",
+			Description:  "Writes and edits code",
 			Model:        "glm-4.5",
 			SystemPrompt: "You are a coding assistant.",
 		},

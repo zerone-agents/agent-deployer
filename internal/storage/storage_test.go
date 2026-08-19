@@ -15,6 +15,117 @@ import (
 
 func strPtr(v string) *string { return &v }
 
+func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	subMaxTurns := 10
+	agent := model.AgentDefinition{
+		Name:         "coder",
+		Description:  "Writes and edits code",
+		Model:        "claude-sonnet-4-6",
+		SystemPrompt: "You are a coding assistant.",
+		Tools:        []string{"Read", "Write"},
+		Subagents: []model.SubagentDefinition{
+			{
+				Name:        "reviewer",
+				Description: "Review code",
+				Prompt:      "You are a code reviewer.",
+				Tools:       []string{"Read"},
+				MaxTurns:    &subMaxTurns,
+			},
+		},
+	}
+
+	require.NoError(t, store.WriteAgentYAML("coder", agent, nil))
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+
+	var doc map[string]interface{}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+
+	agents, ok := doc["agents"].([]interface{})
+	require.True(t, ok, "top-level agents key should be a list")
+	require.Len(t, agents, 2, "main agent + each subagent should be a top-level entry")
+
+	main, ok := agents[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "coder", main["id"])
+	assert.Equal(t, "Writes and edits code", main["description"],
+		"runtime 2.0 requires description on every agent entry")
+	assert.Equal(t, []interface{}{"reviewer"}, main["subagents"],
+		"subagents should be an id reference list, not inline definitions")
+
+	sub, ok := agents[1].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "reviewer", sub["id"])
+	assert.Equal(t, "reviewer", sub["name"])
+	assert.Equal(t, "Review code", sub["description"])
+	assert.Equal(t, "You are a code reviewer.", sub["systemPrompt"])
+	assert.Equal(t, []interface{}{"Read"}, sub["allowedTools"])
+	assert.Equal(t, 10, sub["maxTurns"])
+	_, hasModel := sub["model"]
+	assert.False(t, hasModel, "subagent entry should not pin a model; mounting ignores it")
+	_, hasSettingSources := sub["settingSources"]
+	assert.False(t, hasSettingSources, "subagent entry should not carry settingSources")
+}
+
+func TestReadAgentYAML_Runtime20RoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	subMaxTurns := 10
+	agent := model.AgentDefinition{
+		Name:         "coder",
+		Description:  "Writes and edits code",
+		Model:        "claude-sonnet-4-6",
+		SystemPrompt: "You are a coding assistant.",
+		Subagents: []model.SubagentDefinition{
+			{Name: "reviewer", Description: "Review code", Prompt: "You are a code reviewer.", Tools: []string{"Read"}, MaxTurns: &subMaxTurns},
+		},
+	}
+
+	require.NoError(t, store.WriteAgentYAML("coder", agent, nil))
+
+	readAgent, err := store.ReadAgentYAML("coder")
+	require.NoError(t, err)
+	assert.Equal(t, "coder", readAgent.Name)
+	assert.Equal(t, "Writes and edits code", readAgent.Description)
+	require.Len(t, readAgent.Subagents, 1)
+	assert.Equal(t, agent.Subagents[0], readAgent.Subagents[0])
+}
+
+func TestReadAgentYAML_MainEntryFoundByIDNotPosition(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	agentDir := filepath.Join(tmpDir, "coder", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	yamlBytes := []byte(`agents:
+  - id: reviewer
+    description: Review code
+    systemPrompt: You are a code reviewer.
+  - id: coder
+    description: Writes and edits code
+    model: claude-sonnet-4-6
+    systemPrompt: You are a coding assistant.
+    subagents:
+      - reviewer
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), yamlBytes, 0644))
+
+	readAgent, err := store.ReadAgentYAML("coder")
+	require.NoError(t, err)
+	assert.Equal(t, "coder", readAgent.Name)
+	assert.Equal(t, "Writes and edits code", readAgent.Description)
+	assert.Equal(t, "claude-sonnet-4-6", readAgent.Model)
+	require.Len(t, readAgent.Subagents, 1)
+	assert.Equal(t, "reviewer", readAgent.Subagents[0].Name)
+	assert.Equal(t, "Review code", readAgent.Subagents[0].Description)
+	assert.Equal(t, "You are a code reviewer.", readAgent.Subagents[0].Prompt)
+}
+
 func TestWriteAndReadAgentYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
@@ -116,7 +227,7 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 
 	agents, ok := doc["agents"].([]interface{})
 	require.True(t, ok, "top-level agents key should be a list")
-	require.Len(t, agents, 1)
+	require.Len(t, agents, 2, "main agent + subagent as first-class entries")
 
 	entry, ok := agents[0].(map[string]interface{})
 	require.True(t, ok)
@@ -135,13 +246,15 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 	require.True(t, ok, "datasets should be present")
 	assert.Equal(t, "Primary dataset", datasets["dataset-1"])
 
-	subagents, ok := entry["subagents"].(map[string]interface{})
-	require.True(t, ok, "subagents should be a map")
-	reviewer, ok := subagents["reviewer"].(map[string]interface{})
+	assert.Equal(t, []interface{}{"reviewer"}, entry["subagents"],
+		"subagents should be an id reference list")
+
+	reviewer, ok := agents[1].(map[string]interface{})
 	require.True(t, ok)
+	assert.Equal(t, "reviewer", reviewer["id"])
 	assert.Equal(t, "Review code", reviewer["description"])
-	assert.Equal(t, "You are a code reviewer.", reviewer["prompt"])
-	assert.Equal(t, []interface{}{"Read"}, reviewer["tools"])
+	assert.Equal(t, "You are a code reviewer.", reviewer["systemPrompt"])
+	assert.Equal(t, []interface{}{"Read"}, reviewer["allowedTools"])
 	assert.Equal(t, 10, reviewer["maxTurns"])
 }
 
@@ -232,7 +345,7 @@ func TestReadAgentYAML_EmptyAgentsList(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrNoAgents), "expected ErrNoAgents, got: %v", err)
 }
 
-func TestReadAgentYAML_DeterministicSubagentOrder(t *testing.T) {
+func TestReadAgentYAML_SubagentsPreserveDefinitionOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
@@ -251,12 +364,12 @@ func TestReadAgentYAML_DeterministicSubagentOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, readAgent.Subagents, 3)
 
-	expected := []string{"alpha", "mid", "zeta"}
+	expected := []string{"zeta", "alpha", "mid"}
 	actual := make([]string, len(readAgent.Subagents))
 	for i, s := range readAgent.Subagents {
 		actual[i] = s.Name
 	}
-	assert.Equal(t, expected, actual, "subagents should be sorted alphabetically")
+	assert.Equal(t, expected, actual, "subagents should preserve the definition order of the id reference list")
 }
 
 func TestEnsureDirs_CreatesMultipleDirs(t *testing.T) {
@@ -543,12 +656,13 @@ func TestWriteAgentYAML_ContainsMaxSessionTurns(t *testing.T) {
 	require.NoError(t, err)
 
 	agents := doc["agents"].([]interface{})
+	require.Len(t, agents, 2)
 	entry := agents[0].(map[string]interface{})
 	assert.Equal(t, 50, entry["maxSessionTurns"])
+	assert.Equal(t, []interface{}{"reviewer"}, entry["subagents"])
 
 	// Subagent should NOT carry maxSessionTurns (agent-runtime issue #1: won't fix).
-	subagents := entry["subagents"].(map[string]interface{})
-	reviewer := subagents["reviewer"].(map[string]interface{})
+	reviewer := agents[1].(map[string]interface{})
 	_, present := reviewer["maxSessionTurns"]
 	assert.False(t, present, "subagent maxSessionTurns should not be serialized")
 }

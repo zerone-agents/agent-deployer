@@ -27,10 +27,15 @@ func NewAgentStorage(dataDir string) *AgentStorage {
 }
 
 // runtimeAgentEntry is the shape of a single agent inside the runtime agents.yaml list.
-// Field names match the open-agent-runtime Zod schema (config.js).
+// Field names match the agent-runtime 2.0 Zod schema (src/config.ts).
+//
+// Since 2.0, every agent is a first-class top-level entry: `description` is
+// required and `subagents` is a list of id references to other entries in the
+// same file (inline subagent definitions were removed).
 type runtimeAgentEntry struct {
 	ID              string                           `yaml:"id"`
 	Name            string                           `yaml:"name,omitempty"`
+	Description     string                           `yaml:"description"`
 	Model           string                           `yaml:"model,omitempty"`
 	SystemPrompt    string                           `yaml:"systemPrompt,omitempty"`
 	MaxTurns        *int                             `yaml:"maxTurns,omitempty"`
@@ -38,17 +43,9 @@ type runtimeAgentEntry struct {
 	PermissionMode  string                           `yaml:"permissionMode,omitempty"`
 	AllowedTools    []string                         `yaml:"allowedTools,omitempty"`
 	SettingSources  []string                         `yaml:"settingSources,omitempty"`
-	Subagents       map[string]runtimeSubagent       `yaml:"subagents,omitempty"`
+	Subagents       []string                         `yaml:"subagents,omitempty"`
 	McpServers      map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
 	Datasets        map[string]string                `yaml:"datasets,omitempty"`
-}
-
-// runtimeSubagent is the shape of a subagent in the runtime YAML format.
-type runtimeSubagent struct {
-	Description string   `yaml:"description,omitempty"`
-	Prompt      string   `yaml:"prompt,omitempty"`
-	Tools       []string `yaml:"tools,omitempty"`
-	MaxTurns    *int     `yaml:"maxTurns,omitempty"`
 }
 
 // runtimeAigcSection is the shape of the top-level "aigc" section in the
@@ -93,6 +90,7 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 	entry := runtimeAgentEntry{
 		ID:              name,
 		Name:            name,
+		Description:     agent.Description,
 		Model:           agent.Model,
 		SystemPrompt:    agent.SystemPrompt,
 		MaxTurns:        agent.MaxTurns,
@@ -104,19 +102,30 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 		Datasets:        agent.Datasets,
 	}
 
+	entries := []runtimeAgentEntry{entry}
+
+	// Runtime 2.0 mount-by-reference: each subagent becomes a first-class
+	// top-level entry, and the main entry references it by id. Subagent
+	// entries carry only the 5 fields the runtime maps when mounting
+	// (description, systemPrompt, allowedTools, disallowedTools, maxTurns) —
+	// model, mcpServers and per-agent credentials are intentionally omitted
+	// because they do not apply in the mounted context.
 	if len(agent.Subagents) > 0 {
-		entry.Subagents = make(map[string]runtimeSubagent, len(agent.Subagents))
+		entries[0].Subagents = make([]string, 0, len(agent.Subagents))
 		for _, sub := range agent.Subagents {
-			entry.Subagents[sub.Name] = runtimeSubagent{
-				Description: sub.Description,
-				Prompt:      sub.Prompt,
-				Tools:       sub.Tools,
-				MaxTurns:    sub.MaxTurns,
-			}
+			entries[0].Subagents = append(entries[0].Subagents, sub.Name)
+			entries = append(entries, runtimeAgentEntry{
+				ID:           sub.Name,
+				Name:         sub.Name,
+				Description:  sub.Description,
+				SystemPrompt: sub.Prompt,
+				AllowedTools: sub.Tools,
+				MaxTurns:     sub.MaxTurns,
+			})
 		}
 	}
 
-	doc := runtimeAgentsYAML{Agents: []runtimeAgentEntry{entry}}
+	doc := runtimeAgentsYAML{Agents: entries}
 
 	if aigc != nil && aigc.Enabled {
 		hint := aigc.ExplicitHint
@@ -170,9 +179,26 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error
 		return nil, ErrNoAgents
 	}
 
-	entry := doc.Agents[0]
+	// The main entry is the one whose id matches the storage name; subagent
+	// entries share the same file as first-class agents.
+	byID := make(map[string]runtimeAgentEntry, len(doc.Agents))
+	for _, e := range doc.Agents {
+		byID[e.ID] = e
+	}
+	entry, ok := byID[name]
+	if !ok {
+		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
+	}
+
+	// `name` is optional in the runtime schema (falls back to id); mirror that.
+	entryName := entry.Name
+	if entryName == "" {
+		entryName = entry.ID
+	}
+
 	agent := model.AgentDefinition{
-		Name:            entry.Name,
+		Name:            entryName,
+		Description:     entry.Description,
 		Model:           entry.Model,
 		SystemPrompt:    entry.SystemPrompt,
 		MaxTurns:        entry.MaxTurns,
@@ -184,23 +210,21 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error
 		Datasets:        entry.Datasets,
 	}
 
-	if len(entry.Subagents) > 0 {
-		names := make([]string, 0, len(entry.Subagents))
-		for subName := range entry.Subagents {
-			names = append(names, subName)
+	// Resolve subagent id references back to their definitions. Unknown
+	// references are skipped: the runtime rejects such configs at startup, so
+	// a readable file here implies they resolve; defensively ignore anyway.
+	for _, subID := range entry.Subagents {
+		sub, ok := byID[subID]
+		if !ok {
+			continue
 		}
-		sort.Strings(names)
-		agent.Subagents = make([]model.SubagentDefinition, 0, len(names))
-		for _, subName := range names {
-			sub := entry.Subagents[subName]
-			agent.Subagents = append(agent.Subagents, model.SubagentDefinition{
-				Name:        subName,
-				Description: sub.Description,
-				Prompt:      sub.Prompt,
-				Tools:       sub.Tools,
-				MaxTurns:    sub.MaxTurns,
-			})
-		}
+		agent.Subagents = append(agent.Subagents, model.SubagentDefinition{
+			Name:        subID,
+			Description: sub.Description,
+			Prompt:      sub.SystemPrompt,
+			Tools:       sub.AllowedTools,
+			MaxTurns:    sub.MaxTurns,
+		})
 	}
 
 	return &agent, nil

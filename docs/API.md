@@ -122,6 +122,7 @@ curl -X POST "$DEPLOYER/agents" \
   -d '{
     "agent": {
       "name": "coder",
+      "description": "Writes and edits code",
       "model": "claude-sonnet-4-6",
       "systemPrompt": "You are a coding assistant.",
       "maxTurns": null,
@@ -419,6 +420,7 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 | 字段 | 类型 | 必填 | 校验规则 | 说明 |
 |---|---|---|---|---|
 | `name` | string | 是 | 非空;会被清洗为 `[a-z0-9-]` | 单例键 |
+| `description` | string | 是 | 非空 | agent 功能描述。runtime 2.0 起必填;挂载 subagent 时父 agent 的 Task 工具展示的就是它 |
 | `model` | string | 是 | 非空 | 模型名,如 `claude-sonnet-4-6` |
 | `systemPrompt` | string | 是 | 非空 | 系统提示词 |
 | `maxTurns` | int \| null | 否 | `null` 表示无限制 | Agent 最大对话轮数 |
@@ -427,7 +429,7 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 | `skills` | SkillSource[] | 否 | 见 SkillSource 定义 | 要下载/安装的技能 zip 列表;传到 runtime 时只保留 name 作为 skill 白名单 |
 | `settingSources` | string[] | 否 | — | 触发 runtime 扫描 skills 文件系统的来源(如 `["user","project"]`)**;不传则 skills 不会被加载** |
 | `datasets` | map<string,string> | 否 | `id` 和 `description` 均非空;JSON 中重复 `id` 仅保留最后一个 | dataset_id 到 dataset_description 的映射,会写入 `agents.yaml` 的 `datasets` 字段 |
-| `subagents` | SubagentDefinition[] | 否 | 子 agent 名称不可重复 | 子 agent 配置 |
+| `subagents` | SubagentDefinition[] | 否 | 子 agent 名称不可重复 | 子 agent 配置。runtime 2.0 采用引用挂载:每个 subagent 会被展开为 agents.yaml 中的一等 agent entry,主 entry 只按 id 引用;挂载时仅 `description`/`prompt`/`tools`/`maxTurns` 生效,模型与凭证跟随主 agent |
 
 ### SkillSource
 
