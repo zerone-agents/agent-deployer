@@ -1,31 +1,31 @@
-# agent-deployer 接口调用说明
+# agent-deployer API Reference
 
-agent-deployer 是一个管理 [open-agent-runtime](../open-agent-runtime) Docker 容器生命周期的服务。本文档描述其对外暴露的全部 REST API,供 middle-ground 或任何上层调用方集成使用。
+agent-deployer is a service that manages the lifecycle of [open-agent-runtime](../open-agent-runtime) Docker containers. This document describes all REST APIs it exposes, for integration by middle-ground or any upstream caller.
 
-## 目录
+## Table of Contents
 
-- [通用约定](#通用约定)
+- [Conventions](#conventions)
   - [Base URL](#base-url)
-  - [认证](#认证)
-  - [统一响应格式](#统一响应格式)
-  - [HTTP 状态码](#http-状态码)
-- [接口列表](#接口列表)
-  - [1. 创建 Agent](#1-创建-agent)
-  - [2. 列出全部 Agent](#2-列出全部-agent)
-  - [3. 查询 Agent 详情](#3-查询-agent-详情)
-  - [4. 查询实时状态](#4-查询实时状态)
-  - [5. 查询容器日志](#5-查询容器日志)
-  - [6. 停止 Agent](#6-停止-agent)
-  - [7. 重启 Agent](#7-重启-agent)
-  - [8. 删除 Agent](#8-删除-agent)
-- [数据模型](#数据模型)
-- [Provider 字段映射](#provider-字段映射)
-- [典型调用流程](#典型调用流程)
-- [错误排查](#错误排查)
+  - [Authentication](#authentication)
+  - [Response Format](#response-format)
+  - [HTTP Status Codes](#http-status-codes)
+- [Endpoints](#endpoints)
+  - [1. Create Agent](#1-create-agent)
+  - [2. List All Agents](#2-list-all-agents)
+  - [3. Get Agent Details](#3-get-agent-details)
+  - [4. Get Live Status](#4-get-live-status)
+  - [5. Get Container Logs](#5-get-container-logs)
+  - [6. Stop Agent](#6-stop-agent)
+  - [7. Restart Agent](#7-restart-agent)
+  - [8. Delete Agent](#8-delete-agent)
+- [Data Models](#data-models)
+- [Provider Field Mapping](#provider-field-mapping)
+- [Typical Workflow](#typical-workflow)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## 通用约定
+## Conventions
 
 ### Base URL
 
@@ -33,87 +33,87 @@ agent-deployer 是一个管理 [open-agent-runtime](../open-agent-runtime) Docke
 http://<host>:<port>/api/v1
 ```
 
-- 容器内默认端口 `8080`(由 `AGENT_DEPLOYER_PORT` 控制)。
-- docker-compose 部署时,主机发布端口由 `AGENT_DEPLOYER_HOST_PORT` 控制,默认同样为 `8080`。
+- The default port inside the container is `8080` (controlled by `AGENT_DEPLOYER_PORT`).
+- With docker-compose deployment, the host published port is controlled by `AGENT_DEPLOYER_HOST_PORT`, also defaulting to `8080`.
 
-### 认证
+### Authentication
 
-认证由服务端环境变量 `AGENT_DEPLOYER_API_KEY` 控制:
+Authentication is controlled by the server-side environment variable `AGENT_DEPLOYER_API_KEY`:
 
-- **未设置(空)**:认证关闭,所有 `/api/v1/*` 接口可直接访问。仅建议本地开发使用。
-- **已设置**:每个请求必须携带下列任一 Header,服务端使用常量时间比较(防时序攻击):
+- **Not set (empty)**: authentication is disabled; all `/api/v1/*` endpoints are directly accessible. Recommended only for local development.
+- **Set**: every request must carry one of the following headers; the server uses constant-time comparison (to prevent timing attacks):
 
-| Header | 格式 | 示例 |
+| Header | Format | Example |
 |---|---|---|
 | `Authorization` | `Bearer <key>` | `Authorization: Bearer my-secret-key` |
 | `X-API-Key` | `<key>` | `X-API-Key: my-secret-key` |
 
-`Authorization` 优先于 `X-API-Key`。若同时设置 Bearer 失效会直接返回 401,不会回退到 `X-API-Key`。
+`Authorization` takes precedence over `X-API-Key`. If both are present and the Bearer token is invalid, a 401 is returned immediately without falling back to `X-API-Key`.
 
-**认证失败响应**(HTTP 401):
+**Authentication failure response** (HTTP 401):
 
 ```json
 { "success": false, "error": "unauthorized" }
 ```
 
-### 统一响应格式
+### Response Format
 
-所有接口共用一个响应信封:
+All endpoints share a common response envelope:
 
 ```jsonc
-// 成功(带数据)
+// Success (with data)
 { "success": true, "data": { ... } }
 
-// 成功(无数据,如 stop / restart / delete)
+// Success (no data, e.g. stop / restart / delete)
 { "success": true }
 
-// 失败
-{ "success": false, "error": "人类可读的错误信息" }
+// Failure
+{ "success": false, "error": "human-readable error message" }
 ```
 
-> 例外:`GET /agents/:name/logs` 成功响应的载荷字段为 `logs`(字符串),而非 `data`,详见 [§5](#5-查询容器日志)。
+> Exception: the success response payload of `GET /agents/:name/logs` uses the field `logs` (a string) instead of `data`; see [§5](#5-get-container-logs).
 
-### HTTP 状态码
+### HTTP Status Codes
 
-| 状态码 | 含义 | 触发场景 |
+| Status | Meaning | Triggered by |
 |---|---|---|
-| 200 | 成功 | 所有查询、停止 / 重启 / 删除成功 |
-| 201 | 已创建 | `POST /agents` 成功创建新容器 |
-| 400 | 请求非法 | 请求体无法解析或必填字段缺失 |
-| 401 | 未认证 | 未携带 / 携带了错误的 API Key |
-| 404 | 未找到 | 指定 `name` 的 agent 容器不存在 |
-| 500 | 服务端错误 | Docker 调用失败、磁盘写入失败等 |
+| 200 | Success | All queries; successful stop / restart / delete |
+| 201 | Created | `POST /agents` successfully created a new container |
+| 400 | Bad request | Request body cannot be parsed or required fields are missing |
+| 401 | Unauthorized | Missing or incorrect API Key |
+| 404 | Not found | No agent container exists with the given `name` |
+| 500 | Server error | Docker call failure, disk write failure, etc. |
 
 ---
 
-## 接口列表
+## Endpoints
 
-所有路径均相对于 Base URL `/api/v1`。下文示例假设 Base URL 为 `http://localhost:8080/api/v1`,并已设置:
+All paths are relative to the Base URL `/api/v1`. The examples below assume a Base URL of `http://localhost:8080/api/v1` and the following:
 
 ```bash
 export DEPLOYER=http://localhost:8080/api/v1
-export API_KEY=<你的 key>   # 未启用认证时可不导出
+export API_KEY=<your key>   # can be omitted when authentication is disabled
 ```
 
-### 1. 创建 Agent
+### 1. Create Agent
 
-创建并启动一个 agent 运行时容器。**同名 agent 唯一(单例)**,容器名经清洗后小写化为 `[a-z0-9-]`,作为整个系统中的唯一标识。
+Creates and starts an agent runtime container. **Agent names are unique (singleton)**; the container name is sanitized and lowercased to `[a-z0-9-]`, serving as the unique identifier across the system.
 
-- **幂等性**:若同名容器已存在,且 `force=false`(默认),直接返回已有容器(状态码 200 语义,实际仍为 201);`force=true` 时会先停止 + 删除旧容器,再用新配置重建(会话数据保留)。
-- **方法**:`POST /agents`
-- **Content-Type**:`application/json`
+- **Idempotency**: if a container with the same name already exists and `force=false` (default), the existing container is returned directly (200 semantics, though the actual status code remains 201); with `force=true`, the old container is stopped + deleted first, then rebuilt with the new configuration (session data is preserved).
+- **Method**: `POST /agents`
+- **Content-Type**: `application/json`
 
-#### 请求体
+#### Request Body
 
-| 字段 | 类型 | 必填 | 说明 |
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `agent` | object | 是 | Agent 配置,详见 [AgentDefinition](#agentdefinition) |
-| `provider` | object | 是 | LLM 提供商配置,详见 [ProviderConfig](#providerconfig) |
-| `aigc` | object | 否 | AIGC 内容标识配置(GB 45438-2025),详见 [AigcConfig](#aigcconfig)。省略或 `enabled=false` 时 runtime 不打标识 |
-| `force` | boolean | 否 | 默认 `false`。为 `true` 时强制重建同名容器 |
-| `runtime_token` | string | **是** | 调用方指定的运行时 Token。deployer 不再生成 Token,直接将该值作为 `ZERONE_AGENT_HTTP_API_KEY` 注入容器。要求非空且不含首尾空白 |
+| `agent` | object | Yes | Agent configuration, see [AgentDefinition](#agentdefinition) |
+| `provider` | object | Yes | LLM provider configuration, see [ProviderConfig](#providerconfig) |
+| `aigc` | object | No | AIGC content labeling configuration (GB 45438-2025), see [AigcConfig](#aigcconfig). When omitted or `enabled=false`, the runtime does not add labels |
+| `force` | boolean | No | Defaults to `false`. When `true`, forces rebuilding a container with the same name |
+| `runtime_token` | string | **Yes** | Runtime token specified by the caller. The deployer no longer generates tokens; this value is injected directly into the container as `ZERONE_AGENT_HTTP_API_KEY`. Must be non-empty with no leading/trailing whitespace |
 
-#### 请求示例
+#### Request Example
 
 ```bash
 curl -X POST "$DEPLOYER/agents" \
@@ -153,7 +153,7 @@ curl -X POST "$DEPLOYER/agents" \
   }'
 ```
 
-#### 成功响应(201)
+#### Success Response (201)
 
 ```json
 {
@@ -174,38 +174,38 @@ curl -X POST "$DEPLOYER/agents" \
 }
 ```
 
-#### 字段说明
+#### Field Descriptions
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `agentName` | string | 清洗后的 agent 名称(单例键) |
-| `instanceId` | string | 本次创建生成的短随机 ID,贴入 Docker label `agent-deployer/agent.instance-id`,为未来 HA 场景预留 |
-| `containerId` | string | Docker 容器完整 ID |
-| `containerName` | string | Docker 容器名,形如 `cloud-agent-<name>-<instanceId>` |
-| `status` | string | 状态枚举,详见 [AgentStatus](#agentstatus) |
-| `hostPort` | int | 映射到宿主机的端口(运行时容器内部端口固定,由 `AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT` 控制,默认 3000) |
-| `createdAt` | string | RFC3339 UTC 时间戳 |
-| `yamlPath` | string | 该 agent 的 YAML 配置路径(挂载到容器内 `/app/config`) |
-| `sessionDir` | string | 会话持久化目录(挂载到容器内 `/root/.agents`) |
-| `skillsDir` | string | 技能目录(仅当声明了 skills 时返回, copied into `/workdir/.agents/skills`) |
+| `agentName` | string | Sanitized agent name (unique key) |
+| `instanceId` | string | Short random ID generated at creation time, attached to the Docker label `agent-deployer/agent.instance-id`, reserved for future HA scenarios |
+| `containerId` | string | Full Docker container ID |
+| `containerName` | string | Docker container name, of the form `cloud-agent-<name>-<instanceId>` |
+| `status` | string | Status enum, see [AgentStatus](#agentstatus) |
+| `hostPort` | int | Port mapped to the host (the runtime's internal container port is fixed, controlled by `AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT`, default 3000) |
+| `createdAt` | string | RFC3339 UTC timestamp |
+| `yamlPath` | string | Path to this agent's YAML configuration (mounted into the container at `/app/config`) |
+| `sessionDir` | string | Session persistence directory (mounted into the container at `/root/.agents`) |
+| `skillsDir` | string | Skills directory (returned only when skills are declared, copied into `/workdir/.agents/skills`) |
 
-> **注意**:返回的 `hostPort` 仅在容器运行期内稳定。重建容器后端口会变化,务必每次都重新查询。
+> **Note**: the returned `hostPort` is stable only for the lifetime of the container. The port changes after a container rebuild, so always query it again each time.
 
 ---
 
-### 2. 列出全部 Agent
+### 2. List All Agents
 
-返回当前 deployer 管理的所有 agent(通过 Docker label `agent-deployer/managed=true` 过滤)。
+Returns all agents managed by the current deployer (filtered by the Docker label `agent-deployer/managed=true`).
 
-- **方法**:`GET /agents`
+- **Method**: `GET /agents`
 
-#### 请求示例
+#### Request Example
 
 ```bash
 curl "$DEPLOYER/agents" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
 ```json
 {
@@ -223,22 +223,22 @@ curl "$DEPLOYER/agents" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 }
 ```
 
-> 列表响应**不包含** `createdAt / yamlPath / sessionDir / skillsDir`(这些字段仅在 `POST /agents` 返回)。每个元素的核心字段同 [AgentResponse](#agentresponse)。
+> The list response does **not** include `createdAt / yamlPath / sessionDir / skillsDir` (these fields are only returned by `POST /agents`). Core fields of each element match [AgentResponse](#agentresponse).
 
 ---
 
-### 3. 查询 Agent 详情
+### 3. Get Agent Details
 
-- **方法**:`GET /agents/:name`
-- **路径参数**:`name` — agent 名称(会被同样清洗,大小写不敏感)
+- **Method**: `GET /agents/:name`
+- **Path parameters**: `name` — agent name (sanitized the same way, case-insensitive)
 
-#### 请求示例
+#### Request Example
 
 ```bash
 curl "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
 ```json
 {
@@ -254,26 +254,26 @@ curl "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 }
 ```
 
-#### 失败响应
+#### Failure Response
 
-- `404`:`{ "success": false, "error": "agent \"coder\": agent not found" }`
-- `500`:Docker 查询失败
+- `404`: `{ "success": false, "error": "agent \"coder\": agent not found" }`
+- `500`: Docker query failure
 
 ---
 
-### 4. 查询实时状态
+### 4. Get Live Status
 
-返回容器的实时 Docker 状态与健康检查结果。**创建后应轮询此接口直到 `health=healthy` 再下发任务**,以确认运行时就绪。
+Returns the container's live Docker state and health check result. **After creation, poll this endpoint until `health=healthy` before dispatching tasks** to confirm the runtime is ready.
 
-- **方法**:`GET /agents/:name/status`
+- **Method**: `GET /agents/:name/status`
 
-#### 请求示例
+#### Request Example
 
 ```bash
 curl "$DEPLOYER/agents/coder/status" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
 ```json
 {
@@ -290,37 +290,37 @@ curl "$DEPLOYER/agents/coder/status" ${API_KEY:+-H "Authorization: Bearer $API_K
 }
 ```
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `status` | Docker 原生 state:`running` / `created` / `exited` / `paused` 等 |
-| `health` | Docker 健康检查:`starting` / `healthy` / `unhealthy` / `none`(未配置健康检查或 inspect 失败时) |
-| `image` | 容器使用的镜像名 |
+| `status` | Native Docker state: `running` / `created` / `exited` / `paused`, etc. |
+| `health` | Docker health check: `starting` / `healthy` / `unhealthy` / `none` (when no health check is configured or inspect fails) |
+| `image` | Image name used by the container |
 
-> 与 [§3](#3-查询-agent-详情) 的区别:此接口会额外执行一次 `docker inspect` 拿到健康检查结果;inspect 失败时降级返回 `health=none`,不报错。
+> Difference from [§3](#3-get-agent-details): this endpoint additionally runs a `docker inspect` to obtain the health check result; if the inspect fails, it degrades to `health=none` instead of returning an error.
 
 ---
 
-### 5. 查询容器日志
+### 5. Get Container Logs
 
-返回容器最近的 stdout + stderr 合并输出,用于排查启动失败等问题。
+Returns the container's recent combined stdout + stderr output, useful for diagnosing startup failures and similar issues.
 
-- **方法**:`GET /agents/:name/logs`
-- **查询参数**:
+- **Method**: `GET /agents/:name/logs`
+- **Query parameters**:
 
-| 参数 | 类型 | 默认 | 说明 |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `tail` | int | `100` | 返回最后 N 行;非正整数时回退为默认值 |
+| `tail` | int | `100` | Return the last N lines; falls back to the default when not a positive integer |
 
-#### 请求示例
+#### Request Example
 
 ```bash
-# 取最近 200 行
+# Fetch the last 200 lines
 curl "$DEPLOYER/agents/coder/logs?tail=200" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
-> **注意:载荷字段为 `logs`,不是 `data`。**
+> **Note: the payload field is `logs`, not `data`.**
 
 ```json
 {
@@ -331,19 +331,19 @@ curl "$DEPLOYER/agents/coder/logs?tail=200" ${API_KEY:+-H "Authorization: Bearer
 
 ---
 
-### 6. 停止 Agent
+### 6. Stop Agent
 
-优雅停止容器。容器本身和挂载的数据目录都保留,可随时通过 [restart](#7-重启-agent) 恢复。
+Gracefully stops the container. Both the container itself and the mounted data directories are preserved and can be restored at any time via [restart](#7-restart-agent).
 
-- **方法**:`POST /agents/:name/stop`
+- **Method**: `POST /agents/:name/stop`
 
-#### 请求示例
+#### Request Example
 
 ```bash
 curl -X POST "$DEPLOYER/agents/coder/stop" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
 ```json
 { "success": true }
@@ -351,19 +351,19 @@ curl -X POST "$DEPLOYER/agents/coder/stop" ${API_KEY:+-H "Authorization: Bearer 
 
 ---
 
-### 7. 重启 Agent
+### 7. Restart Agent
 
-重启容器(等同于 `docker restart`)。配置和数据保持不变。
+Restarts the container (equivalent to `docker restart`). Configuration and data remain unchanged.
 
-- **方法**:`POST /agents/:name/restart`
+- **Method**: `POST /agents/:name/restart`
 
-#### 请求示例
+#### Request Example
 
 ```bash
 curl -X POST "$DEPLOYER/agents/coder/restart" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
 ```json
 { "success": true }
@@ -371,38 +371,38 @@ curl -X POST "$DEPLOYER/agents/coder/restart" ${API_KEY:+-H "Authorization: Bear
 
 ---
 
-### 8. 删除 Agent
+### 8. Delete Agent
 
-停止并移除容器。**该接口是幂等的**:即便容器已经不存在,也返回 200。
+Stops and removes the container. **This endpoint is idempotent**: it returns 200 even if the container no longer exists.
 
-- **方法**:`DELETE /agents/:name`
-- **查询参数**:
+- **Method**: `DELETE /agents/:name`
+- **Query parameters**:
 
-| 参数 | 类型 | 默认 | 说明 |
+| Parameter | Type | Default | Description |
 |---|---|---|---|
-| `removeData` | bool | `false` | 为 `true` 时,同时删除宿主机上的 agent 目录(含 `agents.yaml`、会话、技能) |
+| `removeData` | bool | `false` | When `true`, also deletes the agent directory on the host (including `agents.yaml`, sessions, skills) |
 
-#### 请求示例
+#### Request Example
 
 ```bash
-# 仅删容器,保留数据
+# Delete the container only, keep the data
 curl -X DELETE "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 
-# 连同数据一起清理(彻底销毁)
+# Clean up the data as well (full destruction)
 curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
-#### 成功响应(200)
+#### Success Response (200)
 
 ```json
 { "success": true }
 ```
 
-> 即便找不到容器,只要 `removeData=false` 也会返回 200。若 `removeData=true` 且容器已不存在,仍会执行目录清理(尽力而为,best-effort)。
+> Even if the container cannot be found, 200 is returned as long as `removeData=false`. If `removeData=true` and the container no longer exists, directory cleanup is still performed (best-effort).
 
 ---
 
-## 数据模型
+## Data Models
 
 ### CreateAgentRequest
 
@@ -411,141 +411,141 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
   "agent": AgentDefinition,
   "provider": ProviderConfig,
   "force": false,                  // boolean
-  "runtime_token": "must-be-set"   // string, 必填,作为运行时 Token
+  "runtime_token": "must-be-set"   // string, required, used as the runtime token
 }
 ```
 
 ### AgentDefinition
 
-| 字段 | 类型 | 必填 | 校验规则 | 说明 |
+| Field | Type | Required | Validation Rules | Description |
 |---|---|---|---|---|
-| `name` | string | 是 | 非空;会被清洗为 `[a-z0-9-]` | 单例键 |
-| `description` | string | 是 | 非空 | agent 功能描述。runtime 2.0 起必填;挂载 subagent 时父 agent 的 Task 工具展示的就是它 |
-| `model` | string | 是 | 非空 | 模型名,如 `claude-sonnet-4-6` |
-| `systemPrompt` | string | 是 | 非空 | 系统提示词 |
-| `maxTurns` | int \| null | 否 | `null` 表示无限制 | Agent 最大对话轮数 |
-| `permissionMode` | string | 否 | — | 权限模式,如 `auto` |
-| `tools` | string[] | 否 | — | 启用的工具名,如 `["Read","Write"]` |
-| `skills` | SkillSource[] | 否 | 见 SkillSource 定义 | 要下载/安装的技能 zip 列表;传到 runtime 时只保留 name 作为 skill 白名单 |
-| `settingSources` | string[] | 否 | — | 触发 runtime 扫描 skills 文件系统的来源(如 `["user","project"]`)**;不传则 skills 不会被加载** |
-| `datasets` | map<string,string> | 否 | `id` 和 `description` 均非空;JSON 中重复 `id` 仅保留最后一个 | dataset_id 到 dataset_description 的映射,会写入 `agents.yaml` 的 `datasets` 字段 |
-| `subagents` | SubagentDefinition[] | 否 | 子 agent 名称不可重复 | 子 agent 配置。runtime 2.0 采用引用挂载:每个 subagent 会被展开为 agents.yaml 中的一等 agent entry,主 entry 只按 id 引用;挂载时仅 `description`/`prompt`/`tools`/`maxTurns` 生效,模型与凭证跟随主 agent |
+| `name` | string | Yes | Non-empty; sanitized to `[a-z0-9-]` | Unique key |
+| `description` | string | Yes | Non-empty | Description of the agent's capabilities. Required as of runtime 2.0; it is what the parent agent's Task tool displays when mounting the subagent |
+| `model` | string | Yes | Non-empty | Model name, e.g. `claude-sonnet-4-6` |
+| `systemPrompt` | string | Yes | Non-empty | System prompt |
+| `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for the agent |
+| `permissionMode` | string | No | — | Permission mode, e.g. `auto` |
+| `tools` | string[] | No | — | Enabled tool names, e.g. `["Read","Write"]` |
+| `skills` | SkillSource[] | No | See SkillSource definition | List of skill zips to download/install; only the name is kept as a skill whitelist entry when passed to the runtime |
+| `settingSources` | string[] | No | — | Sources that trigger the runtime to scan the skills filesystem (e.g. `["user","project"]`) **; if not provided, skills are not loaded** |
+| `datasets` | map<string,string> | No | Both `id` and `description` must be non-empty; duplicate `id` in JSON keeps only the last one | Mapping of dataset_id to dataset_description, written into the `datasets` field of `agents.yaml` |
+| `subagents` | SubagentDefinition[] | No | Subagent names must be unique | Subagent configurations. Runtime 2.0 uses reference-based mounting: each subagent is expanded into a first-class agent entry in agents.yaml, with the main entry referencing it by id; on mount only `description`/`prompt`/`tools`/`maxTurns` take effect, while the model and credentials follow the main agent |
 
 ### SkillSource
 
-| 字段 | 类型 | 必填 | 校验规则 | 说明 |
+| Field | Type | Required | Validation Rules | Description |
 |---|---|---|---|---|
-| `name` | string | 是 | 匹配 `[A-Za-z0-9._-]{1,64}` | skill 目录名,也是 runtime skill 白名单条目 |
-| `url` | string | 是 | `http(s)` 且有 host | skill zip 下载地址 |
-| `hash` | string | 是 | 64 位 hex(可带 `sha256:` 前缀) | zip 文件 sha256,用于校验和缓存 |
+| `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}` | Skill directory name, also the runtime skill whitelist entry |
+| `url` | string | Yes | `http(s)` with a host | Download URL of the skill zip |
+| `hash` | string | Yes | 64-char hex (may carry a `sha256:` prefix) | sha256 of the zip file, used for verification and caching |
 
 ### SubagentDefinition
 
-| 字段 | 类型 | 必填 | 说明 |
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | 是 | 子 agent 名称,同一 agent 内不可重复 |
-| `description` | string | 是 | 描述 |
-| `prompt` | string | 是 | 子 agent 的提示词 |
-| `tools` | string[] | 否 | 子 agent 启用的工具 |
-| `maxTurns` | int | 否 | 子 agent 最大轮数 |
+| `name` | string | Yes | Subagent name, must be unique within the same agent |
+| `description` | string | Yes | Description |
+| `prompt` | string | Yes | Prompt for the subagent |
+| `tools` | string[] | No | Tools enabled for the subagent |
+| `maxTurns` | int | No | Maximum turns for the subagent |
 
 ### ProviderConfig
 
-| 字段 | 类型 | 必填 | 校验规则 | 说明 |
+| Field | Type | Required | Validation Rules | Description |
 |---|---|---|---|---|
-| `protocol` | string | 是 | 枚举:`anthropic-messages` / `openai-completions` | 提供商协议类型,直接透传为 runtime agents.yaml 的 `apiType` 字段 |
-| `baseUrl` | string | 是 | 非空 | LLM API 基础 URL |
-| `lockedApiKey` | string | 是 | 非空 | 调用 LLM 的 API Key(字段名是历史遗留,实际就是 API Key) |
+| `protocol` | string | Yes | Enum: `anthropic-messages` / `openai-completions` | Provider protocol type, passed through directly as the `apiType` field of the runtime agents.yaml |
+| `baseUrl` | string | Yes | Non-empty | LLM API base URL |
+| `lockedApiKey` | string | Yes | Non-empty | API Key used to call the LLM (the field name is a historical artifact; it is simply the API Key) |
 
 #### AigcConfig
 
-AIGC 生成合成内容标识配置(GB 45438-2025)。写入 runtime agents.yaml 顶层 `aigc:` 段,由 runtime 在响应中注入隐式标识(`aigc` 字段,含 `ContentProducer` / `ProduceID` / `ReservedCode1` 签名)。
+Configuration for AIGC-generated synthetic content labeling (GB 45438-2025). Written into the top-level `aigc:` section of the runtime agents.yaml; the runtime injects implicit labels into responses (the `aigc` field, containing the `ContentProducer` / `ProduceID` / `ReservedCode1` signature).
 
-| 字段 | 类型 | 必填 | 说明 |
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `enabled` | boolean | 是 | 是否启用标识。`false` 或省略整个 `aigc` 时 runtime 不打标识 |
-| `contentProducer` | string | `enabled=true` 时必填 | 27 位服务提供者编码,后 4 位为模型/应用码槽位 |
-| `signingKey` | string | 否 | 标签完整性签名密钥(SHA-256),由调用方生成并保管;不配置则标识无 `ReservedCode1` |
-| `explicitHint` | boolean | 否 | 是否在响应中带 `aigcExplicitHint: true`,提示下游 UI 展示显式标识。**未传时默认 `true`**;显式传 `false` 才关闭 |
-| `label` | enum | 否 | 隐式标识类型,对应 GB 45438-2025: `"1"` = AI生成、`"2"` = 疑似AI生成、`"3"` = 疑似。**未传时 runtime 默认 `"1"`** |
-| `produceIdPrefix` | string | 否 | `ProduceID` 前缀,拼接为 `<prefix><timestamp>-<uuid12>`,便于下游内容溯源。无格式约束,空字符串等同未设置 |
-| `modelCodes` | object | 否 | 模型名 → 4 位模型码映射。命中时替换 `contentProducer` 后 4 位 |
+| `enabled` | boolean | Yes | Whether to enable labeling. When `false` or the entire `aigc` section is omitted, the runtime does not add labels |
+| `contentProducer` | string | Required when `enabled=true` | 27-character service provider code; the last 4 characters are the model/application code slot |
+| `signingKey` | string | No | Label integrity signing key (SHA-256), generated and kept by the caller; if not configured, the label carries no `ReservedCode1` |
+| `explicitHint` | boolean | No | Whether to include `aigcExplicitHint: true` in responses, prompting downstream UIs to display an explicit label. **Defaults to `true` when not provided**; only an explicit `false` disables it |
+| `label` | enum | No | Implicit label type per GB 45438-2025: `"1"` = AI-generated, `"2"` = suspected AI-generated, `"3"` = suspected. **Defaults to `"1"` in the runtime when not provided** |
+| `produceIdPrefix` | string | No | `ProduceID` prefix, concatenated as `<prefix><timestamp>-<uuid12>` to facilitate downstream content tracing. No format constraints; an empty string is equivalent to unset |
+| `modelCodes` | object | No | Model name → 4-character model code mapping. On a match, replaces the last 4 characters of `contentProducer` |
 
-示例:
+Example:
 
 ```json
 "aigc": {
   "enabled": true,
   "contentProducer": "001191320118MAK93FC72D10001",
-  "signingKey": "<调用方生成并保管的密钥>",
+  "signingKey": "<key generated and kept by the caller>",
   "label": "2",
   "produceIdPrefix": "tenant-A/",
   "modelCodes": { "glm-4.5": "0001" }
 }
 ```
 
-注意:`aigc` 内容(含 `signingKey`)不会出现在任何 API 响应中;`force` 重建时不传 `aigc` 即丢弃旧标识配置。
+Note: `aigc` contents (including `signingKey`) never appear in any API response; when rebuilding with `force` and no `aigc` provided, the old labeling configuration is discarded.
 
 ### AgentResponse
 
-`POST /agents`、`GET /agents/:name`、`GET /agents` 返回的数据结构。
+The data structure returned by `POST /agents`, `GET /agents/:name`, and `GET /agents`.
 
-| 字段 | 类型 | 必出现 | 说明 |
+| Field | Type | Always Present | Description |
 |---|---|---|---|
-| `agentName` | string | 是 | |
-| `instanceId` | string | 是 | |
-| `containerId` | string | 是 | |
-| `containerName` | string | 是 | |
-| `status` | AgentStatus | 是 | |
-| `hostPort` | int | 是 | |
-| `createdAt` | string | 仅 `POST` 返回 | RFC3339 UTC |
-| `yamlPath` | string | 仅 `POST` 返回 | |
-| `sessionDir` | string | 仅 `POST` 返回 | |
-| `skillsDir` | string | 仅 `POST` 且声明 skills 时 | |
-| `runtimeToken` | string | 仅 `POST` 返回 | 调用方传入的 Token,与注入容器的 `ZERONE_AGENT_HTTP_API_KEY` 一致;Get / List 不返回 |
+| `agentName` | string | Yes | |
+| `instanceId` | string | Yes | |
+| `containerId` | string | Yes | |
+| `containerName` | string | Yes | |
+| `status` | AgentStatus | Yes | |
+| `hostPort` | int | Yes | |
+| `createdAt` | string | `POST` only | RFC3339 UTC |
+| `yamlPath` | string | `POST` only | |
+| `sessionDir` | string | `POST` only | |
+| `skillsDir` | string | `POST` only, and only when skills are declared | |
+| `runtimeToken` | string | `POST` only | Token provided by the caller, identical to the `ZERONE_AGENT_HTTP_API_KEY` injected into the container; not returned by Get / List |
 
 ### AgentStatus
 
-状态枚举(字符串):
+Status enum (string):
 
-| 值 | 含义 |
+| Value | Meaning |
 |---|---|
-| `running` | 运行中 |
-| `stopped` | 已停止 |
-| `exited` | 已退出 |
-| `not_found` | 未找到 |
-| `unknown` | 未知 Docker 状态 |
+| `running` | Running |
+| `stopped` | Stopped |
+| `exited` | Exited |
+| `not_found` | Not found |
+| `unknown` | Unknown Docker state |
 
-> `GET /agents/:name/status` 的 `status` 字段返回的是 Docker 原生 state(如 `created`),未做归一化。
+> The `status` field of `GET /agents/:name/status` returns the native Docker state (e.g. `created`), not normalized.
 
 ---
 
-## Provider 字段映射
+## Provider Field Mapping
 
-创建时,`provider` 凭证会写入 runtime `agents.yaml` 的主 agent entry(而非环境变量):
+At creation time, `provider` credentials are written into the main agent entry of the runtime `agents.yaml` (not into environment variables):
 
-| 请求字段 | agents.yaml 字段 | 说明 |
+| Request Field | agents.yaml Field | Description |
 |---|---|---|
-| `provider.protocol` | `apiType` | 枚举值与 runtime 一致,直接透传 |
-| `provider.baseUrl` | `baseURL` | LLM API 基础 URL |
-| `provider.lockedApiKey` | `apiKey` | 明文落盘于 dataDir,权限 0644(与 `docker inspect` 可见 env 风险面相当) |
+| `provider.protocol` | `apiType` | Enum values match the runtime, passed through directly |
+| `provider.baseUrl` | `baseURL` | LLM API base URL |
+| `provider.lockedApiKey` | `apiKey` | Written to disk in plaintext under dataDir with mode 0644 (comparable in risk to env vars visible via `docker inspect`) |
 
-容器内唯一注入的 `ZERONE_AGENT_*` 环境变量是 `ZERONE_AGENT_HTTP_API_KEY`(来自请求的 `runtime_token`),用于 runtime 自身 HTTP API 鉴权,与 model 凭证无关。
+The only `ZERONE_AGENT_*` environment variable injected into the container is `ZERONE_AGENT_HTTP_API_KEY` (from the request's `runtime_token`), used for the runtime's own HTTP API authentication; it is unrelated to model credentials.
 
 ---
 
-## 典型调用流程
+## Typical Workflow
 
-一次完整的"创建 → 等待就绪 → 使用 → 销毁"流程:
+A complete "create → wait for readiness → use → destroy" workflow:
 
 ```bash
-# 1. 创建
+# 1. Create
 RESP=$(curl -s -X POST "$DEPLOYER/agents" \
   -H 'Content-Type: application/json' \
   ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
   -d '{ "agent": { ... }, "provider": { ... } }')
 
-# 2. 轮询健康状态直到 healthy
+# 2. Poll health status until healthy
 while :; do
   HEALTH=$(curl -s "$DEPLOYER/agents/coder/status" \
     ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
@@ -555,30 +555,30 @@ while :; do
   sleep 2
 done
 
-# 3. 拿到运行时端口,通过该端口直接与 agent 对话(协议由 open-agent-runtime 决定)
+# 3. Get the runtime port and talk to the agent directly through it (protocol determined by open-agent-runtime)
 PORT=$(echo "$RESP" | jq -r '.data.hostPort')
 
-# 4. 停止 / 重启(按需)
+# 4. Stop / restart (as needed)
 curl -X POST "$DEPLOYER/agents/coder/stop"    ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 curl -X POST "$DEPLOYER/agents/coder/restart" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 
-# 5. 查日志排查问题
+# 5. Check logs to troubleshoot
 curl "$DEPLOYER/agents/coder/logs?tail=500" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 
-# 6. 彻底销毁
+# 6. Full destruction
 curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
 ---
 
-## 错误排查
+## Troubleshooting
 
-| 现象 | 排查方向 |
+| Symptom | What to Check |
 |---|---|
-| 创建返回 400 `invalid request` | 检查 `agent.name/model/systemPrompt`、`provider.protocol/baseUrl/lockedApiKey` 是否齐全;`protocol` 必须是 `anthropic-messages` 或 `openai-completions` |
-| 创建返回 500 `find existing container` | 检查 deployer 容器是否能访问 `/var/run/docker.sock` |
-| 创建后 `health` 长时间 `starting` | 查 `GET /logs`,通常是 agents.yaml 的 `apiKey` 无效或 `baseUrl` 不通(字段来源见「Provider 字段映射」一节) |
-| `health=unhealthy` | 运行时镜像健康检查失败;查日志确认具体异常 |
-| 401 `unauthorized` | 服务端启用了 `AGENT_DEPLOYER_API_KEY`,但请求未携带或 Key 不匹配 |
-| 404 `agent not found` | 名称拼写错误,或容器已被删除;注意名称会被小写化清洗 |
-| `hostPort` 变了 | 重建容器会重新分配端口,务必每次动态查询 |
+| Create returns 400 `invalid request` | Check that `agent.name/model/systemPrompt` and `provider.protocol/baseUrl/lockedApiKey` are all present; `protocol` must be `anthropic-messages` or `openai-completions` |
+| Create returns 500 `find existing container` | Check whether the deployer container can access `/var/run/docker.sock` |
+| `health` stays `starting` for a long time after creation | Check `GET /logs`; usually the agents.yaml `apiKey` is invalid or `baseUrl` is unreachable (see the "Provider Field Mapping" section for field origins) |
+| `health=unhealthy` | Runtime image health check failed; check the logs for the specific error |
+| 401 `unauthorized` | The server has `AGENT_DEPLOYER_API_KEY` enabled, but the request is missing the key or the key does not match |
+| 404 `agent not found` | Misspelled name, or the container was already deleted; note that names are sanitized to lowercase |
+| `hostPort` changed | Rebuilding a container reallocates the port; always query it dynamically each time |
