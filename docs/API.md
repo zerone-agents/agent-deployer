@@ -453,7 +453,7 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 | 字段 | 类型 | 必填 | 校验规则 | 说明 |
 |---|---|---|---|---|
-| `protocol` | string | 是 | 枚举:`anthropic-messages` / `openai-completions` | 提供商协议类型,直接透传为 runtime 的 `ZERONE_AGENT_API_TYPE` |
+| `protocol` | string | 是 | 枚举:`anthropic-messages` / `openai-completions` | 提供商协议类型,直接透传为 runtime agents.yaml 的 `apiType` 字段 |
 | `baseUrl` | string | 是 | 非空 | LLM API 基础 URL |
 | `lockedApiKey` | string | 是 | 非空 | 调用 LLM 的 API Key(字段名是历史遗留,实际就是 API Key) |
 
@@ -522,15 +522,15 @@ AIGC 生成合成内容标识配置(GB 45438-2025)。写入 runtime agents.yaml 
 
 ## Provider 字段映射
 
-创建时,`provider` 和 `agent.model` 等字段会作为环境变量注入到运行时容器:
+创建时,`provider` 凭证会写入 runtime `agents.yaml` 的主 agent entry(而非环境变量):
 
-| 请求字段 | 运行时容器内的环境变量 |
-|---|---|
-| `provider.lockedApiKey` | `ZERONE_AGENT_API_KEY` |
-| `provider.baseUrl` | `ZERONE_AGENT_BASE_URL` |
-| `provider.protocol` | `ZERONE_AGENT_API_TYPE` |
-| `agent.model` | `ZERONE_AGENT_MODEL` |
-| `runtime_token` | `ZERONE_AGENT_HTTP_API_KEY` |
+| 请求字段 | agents.yaml 字段 | 说明 |
+|---|---|---|
+| `provider.protocol` | `apiType` | 枚举值与 runtime 一致,直接透传 |
+| `provider.baseUrl` | `baseURL` | LLM API 基础 URL |
+| `provider.lockedApiKey` | `apiKey` | 明文落盘于 dataDir,权限 0644(与 `docker inspect` 可见 env 风险面相当) |
+
+容器内唯一注入的 `ZERONE_AGENT_*` 环境变量是 `ZERONE_AGENT_HTTP_API_KEY`(来自请求的 `runtime_token`),用于 runtime 自身 HTTP API 鉴权,与 model 凭证无关。
 
 ---
 
@@ -577,7 +577,7 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 |---|---|
 | 创建返回 400 `invalid request` | 检查 `agent.name/model/systemPrompt`、`provider.protocol/baseUrl/lockedApiKey` 是否齐全;`protocol` 必须是 `anthropic-messages` 或 `openai-completions` |
 | 创建返回 500 `find existing container` | 检查 deployer 容器是否能访问 `/var/run/docker.sock` |
-| 创建后 `health` 长时间 `starting` | 查 `GET /logs`,通常是 `ZERONE_AGENT_API_KEY` 无效或 `baseUrl` 不通 |
+| 创建后 `health` 长时间 `starting` | 查 `GET /logs`,通常是 agents.yaml 的 `apiKey` 无效或 `baseUrl` 不通(字段来源见「Provider 字段映射」一节) |
 | `health=unhealthy` | 运行时镜像健康检查失败;查日志确认具体异常 |
 | 401 `unauthorized` | 服务端启用了 `AGENT_DEPLOYER_API_KEY`,但请求未携带或 Key 不匹配 |
 | 404 `agent not found` | 名称拼写错误,或容器已被删除;注意名称会被小写化清洗 |

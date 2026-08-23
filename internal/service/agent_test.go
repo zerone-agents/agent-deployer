@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/zerone-agent/agent-deployer/internal/config"
 	"github.com/zerone-agent/agent-deployer/internal/docker"
@@ -124,6 +125,34 @@ func newTestService(t *testing.T, fake *fakeDockerClient) (*AgentService, string
 		RuntimeContainerPort: 3000,
 	}
 	return NewAgentService(cfg, fake), dataDir
+}
+
+// TestAgentService_Create_WritesProviderCredentialsToYAML guards the
+// service→storage passthrough: the provider triple from the request must end
+// up in the main agent entry of the runtime agents.yaml.
+func TestAgentService_Create_WritesProviderCredentialsToYAML(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.Provider = model.ProviderConfig{
+		Protocol: "openai-completions",
+		BaseURL:  "https://api.deepseek.com",
+		APIKey:   "sk-e2e",
+	}
+
+	_, _, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+
+	var doc map[string]interface{}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	main := doc["agents"].([]interface{})[0].(map[string]interface{})
+	assert.Equal(t, "sk-e2e", main["apiKey"])
+	assert.Equal(t, "https://api.deepseek.com", main["baseURL"])
+	assert.Equal(t, "openai-completions", main["apiType"])
 }
 
 func TestAgentService_Create_NewAgent(t *testing.T) {

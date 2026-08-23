@@ -49,7 +49,7 @@ Zerone Agent Deployer is the orchestration layer for AI agent containers — a s
   - `agents/<name>/agents.yaml` → bind-mounted to `/app/config` (read by the runtime image's default CMD via `--config /app/config`)
   - `sessions/<name>/` → bind-mounted to `/root/.agents` (session persistence)
   - `skills/` → copied into container at `/workdir/.agents/skills/` via `docker cp` (only when the agent declares skills)
-- The `provider` part of the request is injected as `ZERONE_AGENT_*` environment variables.
+- The `provider` credentials are written into the runtime `agents.yaml` (main agent entry).
 - Singleton enforcement uses Docker labels (`agent-deployer/managed`, `agent-deployer/agent.name`). Each create also stamps a unique `agent-deployer/agent.instance-id` for future HA scenarios.
 
 ## Quick Start
@@ -180,15 +180,17 @@ All endpoints are under `/api/v1`. Responses use a standard envelope:
 }
 ```
 
-### Provider → environment variable mapping
+### Provider → agents.yaml field mapping
 
-| Request field | Runtime env var |
-|---|---|
-| `provider.lockedApiKey` | `ZERONE_AGENT_API_KEY` |
-| `provider.baseUrl` | `ZERONE_AGENT_BASE_URL` |
-| `provider.protocol` | `ZERONE_AGENT_API_TYPE` |
-| `agent.model` | `ZERONE_AGENT_MODEL` |
-| `runtime_token` (required) | `ZERONE_AGENT_HTTP_API_KEY` — supplied by the caller in the Create request. The deployer does NOT generate or persist it, so clients must manage and rotate it themselves. |
+At create time, `provider` credentials are written into the runtime `agents.yaml` main agent entry (not environment variables):
+
+| Request field | agents.yaml field | Notes |
+|---|---|---|
+| `provider.protocol` | `apiType` | Enum value matches the runtime, passed through as-is |
+| `provider.baseUrl` | `baseURL` | LLM API base URL |
+| `provider.lockedApiKey` | `apiKey` | Written in plaintext to dataDir with 0644 permissions (equivalent risk surface to env vars visible via `docker inspect`) |
+
+The only `ZERONE_AGENT_*` environment variable injected into the container is `ZERONE_AGENT_HTTP_API_KEY` (from the request's `runtime_token`), used for the runtime's own HTTP API auth — unrelated to model credentials. The `runtime_token` is supplied by the caller in the Create request; the deployer does NOT generate or persist it, so clients must manage and rotate it themselves.
 
 ## Skills
 
