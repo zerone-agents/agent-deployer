@@ -209,7 +209,7 @@ func (c *Client) CreateAgentContainer(ctx context.Context, opts CreateOpts) (str
 	portStr := fmt.Sprintf("%d/tcp", opts.RuntimeContainerPort)
 	port := nat.Port(portStr)
 
-	env := buildEnvVars(opts.Agent, opts.Provider, opts.RuntimeToken)
+	env := buildEnvVars(opts.RuntimeToken)
 
 	labels := map[string]string{
 		LabelManaged:    "true",
@@ -332,28 +332,15 @@ func (c *Client) ContainerLogs(ctx context.Context, id string, tail int) (string
 	return stdout.String(), nil
 }
 
-// buildEnvVars constructs the ZERONE_AGENT_* environment variables for the
-// agent-runtime process. Empty fields are omitted so that the runtime's
-// own defaults can take effect.
-func buildEnvVars(agent model.AgentDefinition, provider model.ProviderConfig, runtimeToken string) []string {
+// buildEnvVars constructs the environment variables for the agent-runtime
+// process. Provider credentials (apiKey/baseURL/apiType) and the model are
+// written into the runtime agents.yaml by the storage layer instead — the
+// only env injected here is the runtime's own HTTP API auth token.
+func buildEnvVars(runtimeToken string) []string {
 	var env []string
-
-	if provider.APIKey != "" {
-		env = append(env, "ZERONE_AGENT_API_KEY="+provider.APIKey)
-	}
-	if provider.BaseURL != "" {
-		env = append(env, "ZERONE_AGENT_BASE_URL="+provider.BaseURL)
-	}
-	if provider.Protocol != "" {
-		env = append(env, "ZERONE_AGENT_API_TYPE="+provider.Protocol)
-	}
-	if agent.Model != "" {
-		env = append(env, "ZERONE_AGENT_MODEL="+agent.Model)
-	}
 	if runtimeToken != "" {
 		env = append(env, "ZERONE_AGENT_HTTP_API_KEY="+runtimeToken)
 	}
-
 	return env
 }
 

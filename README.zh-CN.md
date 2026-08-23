@@ -49,7 +49,7 @@ Zerone Agent Deployer 是 AI agent 容器的编排层 —— 一个轻量 Go HTT
   - `agents/<name>/agents.yaml` → bind-mount 到 `/app/config`（runtime 镜像默认 CMD 通过 `--config /app/config` 读取）
   - `sessions/<name>/` → bind-mount 到 `/root/.agents`（会话持久化）
   - `skills/` → 通过 `docker cp` 复制到容器内的 `/workdir/.agents/skills/`（仅当 agent 声明了 skills 时）
-- 请求中的 `provider` 部分会作为 `ZERONE_AGENT_*` 环境变量注入。
+- 请求中的 `provider` 凭证会写入 runtime `agents.yaml` 的主 agent entry。
 - 单实例约束通过 Docker label 实现（`agent-deployer/managed`、`agent-deployer/agent.name`）。每次 create 还会打一个唯一的 `agent-deployer/agent.instance-id`，为未来 HA 场景预留。
 
 ## 快速开始
@@ -180,15 +180,17 @@ docker-compose 部署方式还额外接受：
 }
 ```
 
-### Provider → 环境变量映射
+### Provider → agents.yaml 字段映射
 
-| 请求字段 | Runtime 环境变量 |
-|---|---|
-| `provider.lockedApiKey` | `ZERONE_AGENT_API_KEY` |
-| `provider.baseUrl` | `ZERONE_AGENT_BASE_URL` |
-| `provider.protocol` | `ZERONE_AGENT_API_TYPE` |
-| `agent.model` | `ZERONE_AGENT_MODEL` |
-| `runtime_token`（必填） | `ZERONE_AGENT_HTTP_API_KEY` —— 由调用方在 Create 请求中提供。deployer **不会**生成或持久化它，客户端需自行管理与轮转。 |
+创建时,`provider` 凭证会写入 runtime `agents.yaml` 的主 agent entry(而非环境变量):
+
+| 请求字段 | agents.yaml 字段 | 说明 |
+|---|---|---|
+| `provider.protocol` | `apiType` | 枚举值与 runtime 一致,直接透传 |
+| `provider.baseUrl` | `baseURL` | LLM API 基础 URL |
+| `provider.lockedApiKey` | `apiKey` | 明文落盘于 dataDir,权限 0644(与 `docker inspect` 可见 env 风险面相当) |
+
+容器内唯一注入的 `ZERONE_AGENT_*` 环境变量是 `ZERONE_AGENT_HTTP_API_KEY`(来自请求的 `runtime_token`),用于 runtime 自身 HTTP API 鉴权,与 model 凭证无关。`runtime_token` 由调用方在 Create 请求中提供,deployer **不会**生成或持久化它,客户端需自行管理与轮转。
 
 ## Skills
 
