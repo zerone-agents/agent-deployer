@@ -46,6 +46,14 @@ type runtimeAgentEntry struct {
 	Subagents       []string                         `yaml:"subagents,omitempty"`
 	McpServers      map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
 	Datasets        map[string]string                `yaml:"datasets,omitempty"`
+
+	// Provider credentials, written to the main entry only (runtime 2.0
+	// per-agent credentials; subagent mounting ignores them). apiType is
+	// provider.Protocol passed through verbatim — both sides use the same
+	// enum (anthropic-messages / openai-completions).
+	APIKey  string `yaml:"apiKey,omitempty"`
+	BaseURL string `yaml:"baseURL,omitempty"`
+	APIType string `yaml:"apiType,omitempty"`
 }
 
 // runtimeAigcSection is the shape of the top-level "aigc" section in the
@@ -69,7 +77,7 @@ type runtimeAgentsYAML struct {
 
 // WriteAgentYAML writes the agent definition to <agentsDir>/<name>/agents.yaml
 // in the runtime agents.yaml format.
-func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, aigc *model.AigcConfig) error {
+func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig) error {
 	if strings.TrimSpace(agent.Name) == "" {
 		return fmt.Errorf("agent.Name is required")
 	}
@@ -100,6 +108,9 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 		SettingSources:  settingSources,
 		McpServers:      agent.McpServers,
 		Datasets:        agent.Datasets,
+		APIKey:          provider.APIKey,
+		BaseURL:         provider.BaseURL,
+		APIType:         provider.Protocol,
 	}
 
 	entries := []runtimeAgentEntry{entry}
