@@ -12,73 +12,17 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
-// containsEnv reports whether the env slice contains the given prefix
-// (e.g. "ZERONE_AGENT_MODEL=").
-func containsEnv(env []string, prefix string) bool {
-	for _, e := range env {
-		if strings.HasPrefix(e, prefix) {
-			return true
-		}
-	}
-	return false
+func TestBuildEnvVars_OnlyHTTPAPIKey(t *testing.T) {
+	env := buildEnvVars("runtime-http-key")
+	assert.Equal(t, []string{"ZERONE_AGENT_HTTP_API_KEY=runtime-http-key"}, env,
+		"credentials/model now live in agents.yaml; only the runtime's own API key stays in env")
 }
 
-func TestBuildEnvVars(t *testing.T) {
-	agent := model.AgentDefinition{Model: "claude-3-5-sonnet"}
-	provider := model.ProviderConfig{
-		Protocol: "anthropic-messages",
-		BaseURL:  "https://api.anthropic.com",
-		APIKey:   "sk-test-key",
-	}
-
-	env := buildEnvVars(agent, provider, "http-key")
-
-	if !containsEnv(env, "ZERONE_AGENT_API_KEY=") {
-		t.Errorf("missing ZERONE_AGENT_API_KEY; env=%v", env)
-	}
-	if !containsEnv(env, "ZERONE_AGENT_BASE_URL=") {
-		t.Errorf("missing ZERONE_AGENT_BASE_URL; env=%v", env)
-	}
-	if !containsEnv(env, "ZERONE_AGENT_API_TYPE=") {
-		t.Errorf("missing ZERONE_AGENT_API_TYPE; env=%v", env)
-	}
-	if !containsEnv(env, "ZERONE_AGENT_MODEL=") {
-		t.Errorf("missing ZERONE_AGENT_MODEL; env=%v", env)
-	}
-}
-
-func TestBuildEnvVars_NoModel(t *testing.T) {
-	agent := model.AgentDefinition{Model: ""}
-	provider := model.ProviderConfig{
-		Protocol: "anthropic-messages",
-		BaseURL:  "https://api.anthropic.com",
-		APIKey:   "sk-test-key",
-	}
-
-	env := buildEnvVars(agent, provider, "http-key")
-
-	if containsEnv(env, "ZERONE_AGENT_MODEL=") {
-		t.Errorf("ZERONE_AGENT_MODEL should not be present when Model is empty; env=%v", env)
-	}
-}
-
-func TestBuildEnvVars_WithHTTPKey(t *testing.T) {
-	agent := model.AgentDefinition{Model: "claude-3-5-sonnet"}
-	provider := model.ProviderConfig{
-		Protocol: "anthropic-messages",
-		BaseURL:  "https://api.anthropic.com",
-		APIKey:   "sk-test-key",
-	}
-
-	env := buildEnvVars(agent, provider, "runtime-http-key")
-
-	if !containsEnv(env, "ZERONE_AGENT_HTTP_API_KEY=runtime-http-key") {
-		t.Errorf("expected ZERONE_AGENT_HTTP_API_KEY=runtime-http-key; env=%v", env)
-	}
+func TestBuildEnvVars_EmptyTokenNoEnv(t *testing.T) {
+	env := buildEnvVars("")
+	assert.Empty(t, env)
 }
 
 func TestToRuntimeContainer(t *testing.T) {
