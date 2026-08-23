@@ -855,3 +855,38 @@ func TestWriteAgentYAML_ProviderCredentialsOnMainEntryOnly(t *testing.T) {
 		assert.False(t, present, "subagent entry should not carry %s", f)
 	}
 }
+
+func TestWriteAgentYAML_CredentialFieldOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	agent := model.AgentDefinition{
+		Name:         "coder",
+		Description:  "Writes and edits code",
+		Model:        "claude-sonnet-4-6",
+		SystemPrompt: "You are a coding assistant.",
+	}
+	provider := model.ProviderConfig{
+		Protocol: "anthropic-messages",
+		BaseURL:  "https://api.anthropic.com",
+		APIKey:   "sk-secret",
+	}
+
+	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil))
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	text := string(data)
+
+	// yaml.v3 emits struct fields in declaration order; guard that the
+	// credential fields sit right after model (mirroring the runtime's own
+	// docs example: id, description, model, apiType, baseURL, apiKey, ...).
+	order := []string{"model:", "apiType:", "baseURL:", "apiKey:", "systemPrompt:"}
+	prev := -1
+	for _, key := range order {
+		idx := strings.Index(text, key)
+		require.GreaterOrEqual(t, idx, 0, "field %s missing from yaml", key)
+		assert.Greater(t, idx, prev, "field %s should come after the previous field", key)
+		prev = idx
+	}
+}

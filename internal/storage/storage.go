@@ -33,10 +33,18 @@ func NewAgentStorage(dataDir string) *AgentStorage {
 // required and `subagents` is a list of id references to other entries in the
 // same file (inline subagent definitions were removed).
 type runtimeAgentEntry struct {
-	ID              string                           `yaml:"id"`
-	Name            string                           `yaml:"name,omitempty"`
-	Description     string                           `yaml:"description"`
-	Model           string                           `yaml:"model,omitempty"`
+	ID          string `yaml:"id"`
+	Name        string `yaml:"name,omitempty"`
+	Description string `yaml:"description"`
+	Model       string `yaml:"model,omitempty"`
+	// Provider credentials, written to the main entry only (runtime 2.0
+	// per-agent credentials; subagent mounting ignores them). apiType is
+	// provider.Protocol passed through verbatim — both sides use the same
+	// enum (anthropic-messages / openai-completions). Field order mirrors
+	// the runtime's own docs example: model, apiType, baseURL, apiKey.
+	APIType         string                           `yaml:"apiType,omitempty"`
+	BaseURL         string                           `yaml:"baseURL,omitempty"`
+	APIKey          string                           `yaml:"apiKey,omitempty"`
 	SystemPrompt    string                           `yaml:"systemPrompt,omitempty"`
 	MaxTurns        *int                             `yaml:"maxTurns,omitempty"`
 	MaxSessionTurns *int                             `yaml:"maxSessionTurns,omitempty"`
@@ -46,14 +54,6 @@ type runtimeAgentEntry struct {
 	Subagents       []string                         `yaml:"subagents,omitempty"`
 	McpServers      map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
 	Datasets        map[string]string                `yaml:"datasets,omitempty"`
-
-	// Provider credentials, written to the main entry only (runtime 2.0
-	// per-agent credentials; subagent mounting ignores them). apiType is
-	// provider.Protocol passed through verbatim — both sides use the same
-	// enum (anthropic-messages / openai-completions).
-	APIKey  string `yaml:"apiKey,omitempty"`
-	BaseURL string `yaml:"baseURL,omitempty"`
-	APIType string `yaml:"apiType,omitempty"`
 }
 
 // runtimeAigcSection is the shape of the top-level "aigc" section in the
