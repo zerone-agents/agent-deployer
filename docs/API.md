@@ -110,6 +110,7 @@ Creates and starts an agent runtime container. **Agent names are unique (singlet
 | `agent` | object | Yes | Agent configuration, see [AgentDefinition](#agentdefinition) |
 | `provider` | object | Yes | LLM provider configuration, see [ProviderConfig](#providerconfig) |
 | `aigc` | object | No | AIGC content labeling configuration (GB 45438-2025), see [AigcConfig](#aigcconfig). When omitted or `enabled=false`, the runtime does not add labels |
+| `hub` | object | No | Agent-hub chat record push configuration, see [HubConfig](#hubconfig). When omitted or `enabled=false`, the runtime does not push chat records |
 | `force` | boolean | No | Defaults to `false`. When `true`, forces rebuilding a container with the same name |
 | `runtime_token` | string | **Yes** | Runtime token specified by the caller. The deployer no longer generates tokens; this value is injected directly into the container as `ZERONE_AGENT_HTTP_API_KEY`. Must be non-empty with no leading/trailing whitespace |
 
@@ -485,6 +486,28 @@ Example:
 ```
 
 Note: `aigc` contents (including `signingKey`) never appear in any API response; when rebuilding with `force` and no `aigc` provided, the old labeling configuration is discarded.
+
+#### HubConfig
+
+Configuration for pushing chat records (sessions / messages) back to an agent-hub instance. Written into the top-level `hub:` section of the runtime agents.yaml; the runtime (≥ v2.1.1) pushes records via the `X-Chat-Push-Key` channel.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | boolean | Yes | Whether to enable chat record push. When `false` or the entire `hub` section is omitted, the runtime does not push |
+| `baseUrl` | string | Required when `enabled=true` | Absolute `http`/`https` URL of the agent-hub instance (the bare API base, without a `/api/v1` suffix) |
+| `chatPushKey` | string | Required when `enabled=true` | Shared secret for the push channel, identical to the hub-side `CHAT_PUSH_API_KEY` env |
+
+Example:
+
+```json
+"hub": {
+  "enabled": true,
+  "baseUrl": "http://agent-hub:8080",
+  "chatPushKey": "<same value as the hub-side CHAT_PUSH_API_KEY>"
+}
+```
+
+Note: `chatPushKey` is a shared secret — it is never logged and never appears in any API response; it only lands in the runtime agents.yaml on disk. Requests with `enabled=true` but a missing/invalid `baseUrl` or `chatPushKey` are rejected with 400 before any container is created (otherwise the runtime would crash at startup). When rebuilding with `force` and no `hub` provided, the old push configuration is discarded.
 
 ### AgentResponse
 

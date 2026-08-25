@@ -1502,3 +1502,137 @@ func TestCreateAgentRequest_Validate_RuntimeTokenTrailingWhitespace(t *testing.T
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "runtimeToken")
 }
+
+func TestHubConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		hub     *HubConfig
+		wantErr string // 空串表示期望通过
+	}{
+		{
+			name:    "nil config passes",
+			hub:     nil,
+			wantErr: "",
+		},
+		{
+			name: "disabled passes even with invalid fields",
+			hub: &HubConfig{
+				Enabled:     false,
+				BaseURL:     "not a url",
+				ChatPushKey: "",
+			},
+			wantErr: "",
+		},
+		{
+			name: "enabled with valid fields passes",
+			hub: &HubConfig{
+				Enabled:     true,
+				BaseURL:     "http://agent-hub:8080",
+				ChatPushKey: "push-secret",
+			},
+			wantErr: "",
+		},
+		{
+			name: "enabled without baseUrl fails",
+			hub: &HubConfig{
+				Enabled:     true,
+				ChatPushKey: "push-secret",
+			},
+			wantErr: "baseUrl",
+		},
+		{
+			name: "enabled with blank baseUrl fails",
+			hub: &HubConfig{
+				Enabled:     true,
+				BaseURL:     "   ",
+				ChatPushKey: "push-secret",
+			},
+			wantErr: "baseUrl",
+		},
+		{
+			name: "enabled without chatPushKey fails",
+			hub: &HubConfig{
+				Enabled: true,
+				BaseURL: "http://agent-hub:8080",
+			},
+			wantErr: "chatPushKey",
+		},
+		{
+			name: "enabled with blank chatPushKey fails",
+			hub: &HubConfig{
+				Enabled:     true,
+				BaseURL:     "http://agent-hub:8080",
+				ChatPushKey: "   ",
+			},
+			wantErr: "chatPushKey",
+		},
+		{
+			name: "baseUrl without scheme fails",
+			hub: &HubConfig{
+				Enabled:     true,
+				BaseURL:     "agent-hub:8080",
+				ChatPushKey: "push-secret",
+			},
+			wantErr: "baseUrl",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.hub.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCreateAgentRequest_Validate_InvalidHub(t *testing.T) {
+	req := CreateAgentRequest{
+		Agent: AgentDefinition{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+		},
+		Provider: ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-ant-xxx",
+		},
+		RuntimeToken: "test-token",
+		Hub:          &HubConfig{Enabled: true, BaseURL: "http://agent-hub:8080"},
+	}
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub: ")
+}
+
+func TestCreateAgentRequest_Validate_ValidHub(t *testing.T) {
+	req := CreateAgentRequest{
+		Agent: AgentDefinition{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+		},
+		Provider: ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-ant-xxx",
+		},
+		RuntimeToken: "test-token",
+		Hub: &HubConfig{
+			Enabled:     true,
+			BaseURL:     "http://agent-hub:8080",
+			ChatPushKey: "push-secret",
+		},
+	}
+
+	err := req.Validate()
+	require.NoError(t, err)
+}
