@@ -901,3 +901,60 @@ func TestAgentService_Create_WithoutAigc(t *testing.T) {
 		t.Errorf("agents.yaml should not contain aigc section; content:\n%s", data)
 	}
 }
+
+func TestAgentService_Create_WithHub(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.Hub = &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+	}
+
+	_, created, err := svc.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create returned unexpected error: %v", err)
+	}
+	if !created {
+		t.Fatalf("created = false, want true")
+	}
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "agents.yaml"))
+	if err != nil {
+		t.Fatalf("read agents.yaml: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"hub:",
+		"enabled: true",
+		"baseUrl: http://agent-hub:8080",
+		"chatPushKey: push-secret",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("agents.yaml missing %q; content:\n%s", want, content)
+		}
+	}
+}
+
+func TestAgentService_Create_WithoutHub(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.Hub = &model.HubConfig{Enabled: false}
+
+	_, _, err := svc.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create returned unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "agents.yaml"))
+	if err != nil {
+		t.Fatalf("read agents.yaml: %v", err)
+	}
+	if strings.Contains(string(data), "hub:") {
+		t.Errorf("agents.yaml should not contain hub section; content:\n%s", data)
+	}
+}

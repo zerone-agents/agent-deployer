@@ -37,7 +37,7 @@ func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestReadAgentYAML_Runtime20RoundTrip(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil))
 
 	readAgent, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestWriteAndReadAgentYAML(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	// Verify file is created at the correct path.
@@ -215,7 +215,7 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -269,7 +269,7 @@ func TestWriteAgentYAML_NilMaxTurnsOmitted(t *testing.T) {
 		MaxTurns:     nil,
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -301,7 +301,7 @@ func TestWriteAgentYAML_NameMismatch(t *testing.T) {
 	agent := model.AgentDefinition{
 		Name: "coder",
 	}
-	err := store.WriteAgentYAML("different-name", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("different-name", agent, model.ProviderConfig{}, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not match storage name")
 }
@@ -313,7 +313,7 @@ func TestWriteAgentYAML_EmptyName(t *testing.T) {
 	agent := model.AgentDefinition{
 		Name: "",
 	}
-	err := store.WriteAgentYAML("", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("", agent, model.ProviderConfig{}, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent.Name is required")
 }
@@ -325,7 +325,7 @@ func TestWriteAgentYAML_PathTraversalRejected(t *testing.T) {
 	cases := []string{"../etc", "a/b", "/abs", ".", ".."}
 	for _, bad := range cases {
 		agent := model.AgentDefinition{Name: bad, Model: "m", SystemPrompt: "p"}
-		err := store.WriteAgentYAML(bad, agent, model.ProviderConfig{}, nil)
+		err := store.WriteAgentYAML(bad, agent, model.ProviderConfig{}, nil, nil)
 		require.Error(t, err, "name %q should be rejected", bad)
 		assert.Contains(t, err.Error(), "must be a single path segment")
 	}
@@ -358,7 +358,7 @@ func TestReadAgentYAML_SubagentsPreserveDefinitionOrder(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("orchestrator", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("orchestrator", agent, model.ProviderConfig{}, nil, nil))
 
 	readAgent, err := store.ReadAgentYAML("orchestrator")
 	require.NoError(t, err)
@@ -446,7 +446,7 @@ func TestWriteAndReadAgentYAML_WithMcpServers(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	readAgent, err := store.ReadAgentYAML("coder")
@@ -480,7 +480,7 @@ func TestWriteAgentYAML_McpServersUsesTransportField(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -510,7 +510,7 @@ func TestWriteAndReadAgentYAML_McpServersEmptyOmitted(t *testing.T) {
 		SystemPrompt: "You are a coding assistant.",
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -541,7 +541,7 @@ func TestWriteAgentYAML_SettingSourcesDefaultsToProject(t *testing.T) {
 		SettingSources: nil, // explicitly nil
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -565,7 +565,7 @@ func TestWriteAgentYAML_SettingSourcesEmptySliceDefaultsToProject(t *testing.T) 
 		SettingSources: []string{}, // explicitly empty
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -589,7 +589,7 @@ func TestWriteAgentYAML_SettingSourcesPassthrough(t *testing.T) {
 		SettingSources: []string{"user", "project"},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -612,7 +612,7 @@ func TestWriteAgentYAML_DatasetsOmittedWhenEmpty(t *testing.T) {
 		Datasets:     map[string]string{},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -645,7 +645,7 @@ func TestWriteAgentYAML_ContainsMaxSessionTurns(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -678,7 +678,7 @@ func TestWriteAgentYAML_NilMaxSessionTurnsOmitted(t *testing.T) {
 		MaxSessionTurns: nil,
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -713,7 +713,7 @@ func TestReadAgentYAML_MaxSessionTurns(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil)
 	require.NoError(t, err)
 
 	readAgent, err := store.ReadAgentYAML("coder")
@@ -744,7 +744,7 @@ func TestWriteAgentYAML_WithAigc(t *testing.T) {
 		// ExplicitHint 未传：应物化为 true
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc)
+	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -780,7 +780,7 @@ func TestWriteAgentYAML_AigcExplicitHintFalsePreserved(t *testing.T) {
 		ExplicitHint:    &explicitFalse,
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -806,7 +806,7 @@ func TestWriteAgentYAML_NoAigcSectionWhenNilOrDisabled(t *testing.T) {
 				Model:        "glm-4.5",
 				SystemPrompt: "You are a coding assistant.",
 			}
-			require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc))
+			require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, nil))
 
 			data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 			require.NoError(t, err)
@@ -834,7 +834,7 @@ func TestWriteAgentYAML_ProviderCredentialsOnMainEntryOnly(t *testing.T) {
 		APIKey:   "sk-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -872,7 +872,7 @@ func TestWriteAgentYAML_CredentialFieldOrder(t *testing.T) {
 		APIKey:   "sk-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -889,4 +889,89 @@ func TestWriteAgentYAML_CredentialFieldOrder(t *testing.T) {
 		assert.Greater(t, idx, prev, "field %s should come after the previous field", key)
 		prev = idx
 	}
+}
+
+func TestWriteAgentYAML_WithHub(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	agent := model.AgentDefinition{
+		Name:         "coder",
+		Description:  "Writes and edits code",
+		Model:        "glm-4.5",
+		SystemPrompt: "You are a coding assistant.",
+	}
+	hub := &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+	}
+
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub))
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+
+	var doc runtimeAgentsYAML
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.NotNil(t, doc.Hub, "hub section should be present")
+	assert.True(t, doc.Hub.Enabled)
+	assert.Equal(t, "http://agent-hub:8080", doc.Hub.BaseURL)
+	assert.Equal(t, "push-secret", doc.Hub.ChatPushKey)
+}
+
+func TestWriteAgentYAML_NoHubSectionWhenNilOrDisabled(t *testing.T) {
+	cases := map[string]*model.HubConfig{
+		"nil":      nil,
+		"disabled": {Enabled: false, BaseURL: "http://agent-hub:8080", ChatPushKey: "push-secret"},
+	}
+	for name, hub := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			store := NewAgentStorage(tmpDir)
+			agent := model.AgentDefinition{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "glm-4.5",
+				SystemPrompt: "You are a coding assistant.",
+			}
+			require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub))
+
+			data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+			require.NoError(t, err)
+			assert.NotContains(t, string(data), "hub:")
+		})
+	}
+}
+
+func TestWriteAgentYAML_HubAndAigcCoexist(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	agent := model.AgentDefinition{
+		Name:         "coder",
+		Description:  "Writes and edits code",
+		Model:        "glm-4.5",
+		SystemPrompt: "You are a coding assistant.",
+	}
+	aigc := &model.AigcConfig{
+		Enabled:         true,
+		ContentProducer: "001191320118MAK93FC72D10001",
+	}
+	hub := &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+	}
+
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, hub))
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+
+	var doc runtimeAgentsYAML
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.NotNil(t, doc.Aigc, "aigc section should still be present")
+	require.NotNil(t, doc.Hub, "hub section should be present")
+	assert.True(t, doc.Hub.Enabled)
 }

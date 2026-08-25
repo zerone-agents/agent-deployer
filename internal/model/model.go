@@ -198,6 +198,45 @@ func (a *AigcConfig) Validate() error {
 	return nil
 }
 
+// HubConfig carries the agent-hub chat-record push configuration for the
+// deployed runtime. It is written verbatim into the runtime agents.yaml
+// top-level "hub" section; field names mirror the runtime's schema
+// (open-agent-runtime src/config.ts, resolveHubConfig). When the section is
+// absent or enabled is false, the runtime does not push chat records.
+//
+// ChatPushKey is a shared secret (same value as the hub-side CHAT_PUSH_API_KEY
+// env): it must never be logged or echoed back in API responses.
+type HubConfig struct {
+	Enabled     bool   `json:"enabled"`
+	BaseURL     string `json:"baseUrl"`
+	ChatPushKey string `json:"chatPushKey,omitempty"`
+}
+
+// Validate checks the hub config against the runtime's fail-fast constraints:
+// when enabled, both baseUrl (an absolute http/https URL) and chatPushKey must
+// be present, otherwise the runtime container would crash at startup. A nil
+// config or Enabled == false is always valid (the section is simply omitted
+// from the runtime YAML).
+func (h *HubConfig) Validate() error {
+	if h == nil || !h.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(h.BaseURL) == "" {
+		return fmt.Errorf("baseUrl is required when hub is enabled")
+	}
+	u, err := url.Parse(h.BaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("baseUrl must be an absolute http(s) URL, got %q", h.BaseURL)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("baseUrl scheme must be http or https, got %q", u.Scheme)
+	}
+	if strings.TrimSpace(h.ChatPushKey) == "" {
+		return fmt.Errorf("chatPushKey is required when hub is enabled")
+	}
+	return nil
+}
+
 // CreateAgentRequest is the top-level request body for creating an agent.
 type CreateAgentRequest struct {
 	Agent        AgentDefinition `json:"agent"`
@@ -205,6 +244,7 @@ type CreateAgentRequest struct {
 	Aigc         *AigcConfig     `json:"aigc,omitempty"`
 	Force        bool            `json:"force"`
 	RuntimeToken string          `json:"runtime_token"`
+	Hub          *HubConfig      `json:"hub,omitempty"`
 }
 
 // AgentStatus represents the state of an agent container.
@@ -299,6 +339,10 @@ func (r *CreateAgentRequest) Validate() error {
 
 	if err := r.Aigc.Validate(); err != nil {
 		return fmt.Errorf("aigc: %w", err)
+	}
+
+	if err := r.Hub.Validate(); err != nil {
+		return fmt.Errorf("hub: %w", err)
 	}
 
 	if strings.TrimSpace(r.RuntimeToken) == "" {

@@ -69,15 +69,26 @@ type runtimeAigcSection struct {
 	ModelCodes      map[string]string `yaml:"modelCodes,omitempty"`
 }
 
+// runtimeHubSection is the shape of the top-level "hub" section in the
+// runtime agents.yaml. Field names mirror the open-agent-runtime schema
+// (src/config.ts, resolveHubConfig) exactly. The section is written only
+// when the push channel is enabled; absence means "push disabled".
+type runtimeHubSection struct {
+	Enabled     bool   `yaml:"enabled"`
+	BaseURL     string `yaml:"baseUrl"`
+	ChatPushKey string `yaml:"chatPushKey"`
+}
+
 // runtimeAgentsYAML is the top-level runtime YAML document.
 type runtimeAgentsYAML struct {
 	Aigc   *runtimeAigcSection `yaml:"aigc,omitempty"`
+	Hub    *runtimeHubSection  `yaml:"hub,omitempty"`
 	Agents []runtimeAgentEntry `yaml:"agents"`
 }
 
 // WriteAgentYAML writes the agent definition to <agentsDir>/<name>/agents.yaml
 // in the runtime agents.yaml format.
-func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig) error {
+func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig) error {
 	if strings.TrimSpace(agent.Name) == "" {
 		return fmt.Errorf("agent.Name is required")
 	}
@@ -152,6 +163,14 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 			Label:           aigc.Label,
 			ProduceIdPrefix: aigc.ProduceIdPrefix,
 			ModelCodes:      aigc.ModelCodes,
+		}
+	}
+
+	if hub != nil && hub.Enabled {
+		doc.Hub = &runtimeHubSection{
+			Enabled:     hub.Enabled,
+			BaseURL:     hub.BaseURL,
+			ChatPushKey: hub.ChatPushKey,
 		}
 	}
 
