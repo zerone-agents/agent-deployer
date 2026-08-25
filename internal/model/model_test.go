@@ -1604,7 +1604,7 @@ func TestCreateAgentRequest_Validate_InvalidHub(t *testing.T) {
 			APIKey:   "sk-ant-xxx",
 		},
 		RuntimeToken: "test-token",
-		Hub:         &HubConfig{Enabled: true, BaseURL: "http://agent-hub:8080"},
+		Hub:          &HubConfig{Enabled: true, BaseURL: "http://agent-hub:8080"},
 	}
 
 	err := req.Validate()
