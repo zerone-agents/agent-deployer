@@ -77,6 +77,7 @@ type runtimeHubSection struct {
 	Enabled     bool   `yaml:"enabled"`
 	BaseURL     string `yaml:"baseUrl"`
 	ChatPushKey string `yaml:"chatPushKey"`
+	Org         string `yaml:"org,omitempty"`
 }
 
 // runtimeAgentsYAML is the top-level runtime YAML document.
@@ -171,6 +172,7 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 			Enabled:     hub.Enabled,
 			BaseURL:     hub.BaseURL,
 			ChatPushKey: hub.ChatPushKey,
+			Org:         hub.Org,
 		}
 	}
 

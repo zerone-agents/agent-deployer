@@ -206,10 +206,17 @@ func (a *AigcConfig) Validate() error {
 //
 // ChatPushKey is a shared secret (same value as the hub-side CHAT_PUSH_API_KEY
 // env): it must never be logged or echoed back in API responses.
+//
+// Org is the deployment-level tenant for chat-record push, supplied by the
+// hub's deploy request (issue #7). The deployer must NOT derive it from
+// client request headers or fill in a default: it is a pure passthrough, and
+// tenant authorization stays on the hub side. When unset, the field is
+// omitted and the hub resolves the default tenant by deploy mode.
 type HubConfig struct {
 	Enabled     bool   `json:"enabled"`
 	BaseURL     string `json:"baseUrl"`
 	ChatPushKey string `json:"chatPushKey,omitempty"`
+	Org         string `json:"org,omitempty"`
 }
 
 // Validate checks the hub config against the runtime's fail-fast constraints:
@@ -233,6 +240,9 @@ func (h *HubConfig) Validate() error {
 	}
 	if strings.TrimSpace(h.ChatPushKey) == "" {
 		return fmt.Errorf("chatPushKey is required when hub is enabled")
+	}
+	if h.Org != "" && strings.TrimSpace(h.Org) == "" {
+		return fmt.Errorf("org must not be blank when provided")
 	}
 	return nil
 }

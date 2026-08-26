@@ -905,6 +905,7 @@ func TestWriteAgentYAML_WithHub(t *testing.T) {
 		Enabled:     true,
 		BaseURL:     "http://agent-hub:8080",
 		ChatPushKey: "push-secret",
+		Org:         "tenant-a",
 	}
 
 	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub))
@@ -918,6 +919,30 @@ func TestWriteAgentYAML_WithHub(t *testing.T) {
 	assert.True(t, doc.Hub.Enabled)
 	assert.Equal(t, "http://agent-hub:8080", doc.Hub.BaseURL)
 	assert.Equal(t, "push-secret", doc.Hub.ChatPushKey)
+	assert.Equal(t, "tenant-a", doc.Hub.Org)
+}
+
+func TestWriteAgentYAML_HubOrgOmittedWhenEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	agent := model.AgentDefinition{
+		Name:         "coder",
+		Description:  "Writes and edits code",
+		Model:        "glm-4.5",
+		SystemPrompt: "You are a coding assistant.",
+	}
+	hub := &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+	}
+
+	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub))
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "org:", "org should be omitted when unset")
 }
 
 func TestWriteAgentYAML_NoHubSectionWhenNilOrDisabled(t *testing.T) {
