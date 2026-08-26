@@ -241,9 +241,8 @@ func (h *HubConfig) Validate() error {
 	if strings.TrimSpace(h.ChatPushKey) == "" {
 		return fmt.Errorf("chatPushKey is required when hub is enabled")
 	}
-	if h.Org != "" && strings.TrimSpace(h.Org) == "" {
-		return fmt.Errorf("org must not be blank when provided")
-	}
+	// org is a pure passthrough per issue #7: no content validation, no
+	// defaulting, no derivation — tenant authorization stays on the hub side.
 	return nil
 }
 

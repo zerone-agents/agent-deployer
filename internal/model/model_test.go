@@ -1543,14 +1543,14 @@ func TestHubConfig_Validate(t *testing.T) {
 			wantErr: "",
 		},
 		{
-			name: "enabled with blank org fails",
+			name: "enabled with blank org passes through verbatim",
 			hub: &HubConfig{
 				Enabled:     true,
 				BaseURL:     "http://agent-hub:8080",
 				ChatPushKey: "push-secret",
 				Org:         "   ",
 			},
-			wantErr: "org",
+			wantErr: "",
 		},
 		{
 			name: "enabled without baseUrl fails",

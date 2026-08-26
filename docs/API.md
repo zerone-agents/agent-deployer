@@ -509,7 +509,7 @@ Example:
 }
 ```
 
-Note: `chatPushKey` is a shared secret — it is never logged and never appears in any API response; it only lands in the runtime agents.yaml on disk. Requests with `enabled=true` but a missing/invalid `baseUrl` or `chatPushKey` (or a blank `org`) are rejected with 400 before any container is created (otherwise the runtime would crash at startup). When rebuilding with `force`, the `hub` section is rewritten from the new request — a rebuild without `hub` (or without `org`) discards the old push configuration / tenant; a rebuild under a different `org` replaces it without leaking the stale value.
+Note: `chatPushKey` is a shared secret — it is never logged and never appears in any API response; it only lands in the runtime agents.yaml on disk. Requests with `enabled=true` but a missing/invalid `baseUrl` or `chatPushKey` are rejected with 400 before any container is created (otherwise the runtime would crash at startup). `org` is passed through with no content validation — if org format constraints are needed, they belong at the hub's trusted deployment boundary. When rebuilding with `force`, the `hub` section is rewritten from the new request — a rebuild without `hub` (or without `org`) discards the old push configuration / tenant; a rebuild under a different `org` replaces it without leaking the stale value.
 
 ### AgentResponse
 
