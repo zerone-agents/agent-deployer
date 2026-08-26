@@ -496,6 +496,7 @@ Configuration for pushing chat records (sessions / messages) back to an agent-hu
 | `enabled` | boolean | Yes | Whether to enable chat record push. When `false` or the entire `hub` section is omitted, the runtime does not push |
 | `baseUrl` | string | Required when `enabled=true` | Absolute `http`/`https` URL of the agent-hub instance (the bare API base, without a `/api/v1` suffix) |
 | `chatPushKey` | string | Required when `enabled=true` | Shared secret for the push channel, identical to the hub-side `CHAT_PUSH_API_KEY` env |
+| `org` | string | No | Deployment-level tenant for chat-record push. Written verbatim into the runtime agents.yaml `hub.org`. The deployer neither derives it from client request headers nor fills in a default — the value must come from the hub's deploy request; when omitted, the hub resolves the default tenant by deploy mode |
 
 Example:
 
@@ -503,11 +504,12 @@ Example:
 "hub": {
   "enabled": true,
   "baseUrl": "http://agent-hub:8080",
-  "chatPushKey": "<same value as the hub-side CHAT_PUSH_API_KEY>"
+  "chatPushKey": "<same value as the hub-side CHAT_PUSH_API_KEY>",
+  "org": "tenant-a"
 }
 ```
 
-Note: `chatPushKey` is a shared secret — it is never logged and never appears in any API response; it only lands in the runtime agents.yaml on disk. Requests with `enabled=true` but a missing/invalid `baseUrl` or `chatPushKey` are rejected with 400 before any container is created (otherwise the runtime would crash at startup). When rebuilding with `force` and no `hub` provided, the old push configuration is discarded.
+Note: `chatPushKey` is a shared secret — it is never logged and never appears in any API response; it only lands in the runtime agents.yaml on disk. Requests with `enabled=true` but a missing/invalid `baseUrl` or `chatPushKey` are rejected with 400 before any container is created (otherwise the runtime would crash at startup). `org` is passed through with no content validation — if org format constraints are needed, they belong at the hub's trusted deployment boundary. When rebuilding with `force`, the `hub` section is rewritten from the new request — a rebuild without `hub` (or without `org`) discards the old push configuration / tenant; a rebuild under a different `org` replaces it without leaking the stale value.
 
 ### AgentResponse
 

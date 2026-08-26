@@ -958,3 +958,88 @@ func TestAgentService_Create_WithoutHub(t *testing.T) {
 		t.Errorf("agents.yaml should not contain hub section; content:\n%s", data)
 	}
 }
+
+// TestAgentService_Create_HubOrgForceRebuild guards the issue #7 acceptance
+// criteria: the same agent name redeployed under a different tenant must get
+// the new hub.org, a force rebuild without org must discard the old tenant,
+// and neither path may leak the stale value into the rewritten agents.yaml.
+func TestAgentService_Create_HubOrgForceRebuild(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	yamlPath := filepath.Join(dataDir, "coder", "agents", "agents.yaml")
+
+	readYAML := func(t *testing.T) string {
+		t.Helper()
+		data, err := os.ReadFile(yamlPath)
+		if err != nil {
+			t.Fatalf("read agents.yaml: %v", err)
+		}
+		return string(data)
+	}
+
+	existing := func() *docker.RuntimeContainer {
+		return &docker.RuntimeContainer{
+			ID:         "existing-id",
+			Name:       "cloud-agent-coder-oldid",
+			AgentName:  "coder",
+			InstanceID: "oldid",
+			Status:     "running",
+			HostPort:   30000,
+		}
+	}
+
+	// Phase 1: initial deploy carries hub.org=tenant-a.
+	req := validRequest()
+	req.Hub = &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+		Org:         "tenant-a",
+	}
+	if _, _, err := svc.Create(context.Background(), req); err != nil {
+		t.Fatalf("Create (initial) returned unexpected error: %v", err)
+	}
+	if got := readYAML(t); !strings.Contains(got, "org: tenant-a") {
+		t.Errorf("agents.yaml missing org: tenant-a after initial deploy; content:\n%s", got)
+	}
+
+	// Phase 2: force rebuild under a different tenant must overwrite, not
+	// merge or drop, the org.
+	fake.existing = existing()
+	req = validRequest()
+	req.Force = true
+	req.Hub = &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+		Org:         "tenant-b",
+	}
+	if _, _, err := svc.Create(context.Background(), req); err != nil {
+		t.Fatalf("Create (force, tenant-b) returned unexpected error: %v", err)
+	}
+	got := readYAML(t)
+	if !strings.Contains(got, "org: tenant-b") {
+		t.Errorf("agents.yaml missing org: tenant-b after force rebuild; content:\n%s", got)
+	}
+	if strings.Contains(got, "tenant-a") {
+		t.Errorf("agents.yaml still contains stale org tenant-a after force rebuild; content:\n%s", got)
+	}
+
+	// Phase 3: force rebuild without org discards the old tenant entirely
+	// (hub then resolves the default tenant by deploy mode).
+	fake.existing = existing()
+	req = validRequest()
+	req.Force = true
+	req.Hub = &model.HubConfig{
+		Enabled:     true,
+		BaseURL:     "http://agent-hub:8080",
+		ChatPushKey: "push-secret",
+	}
+	if _, _, err := svc.Create(context.Background(), req); err != nil {
+		t.Fatalf("Create (force, no org) returned unexpected error: %v", err)
+	}
+	if got := readYAML(t); strings.Contains(got, "org:") {
+		t.Errorf("agents.yaml should have no org after force rebuild without org; content:\n%s", got)
+	}
+}
