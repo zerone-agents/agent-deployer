@@ -19,16 +19,17 @@ services:
       # - AGENT_DEPLOYER_API_KEY=change-me
       # Runtime network topology (issue #11). Default: public (0.0.0.0 dynamic
       # ports, no upstream locator). Every non-public mode additionally
-      # requires AGENT_DEPLOYER_API_KEY (authenticated boundary for the
-      # locator). Options:
+      # requires AGENT_DEPLOYER_HUB_API_KEY (hub-scoped boundary: only this
+      # key is ever served the upstream locator). Options:
       # - AGENT_DEPLOYER_RUNTIME_EXPOSE=loopback
       # - AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network
       #   + AGENT_DEPLOYER_RUNTIME_NETWORK=<shared docker network>
-      #   + AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY=locator-v1   # exported by locator-aware hub deployments
+      #   Hub deploy requests must additionally carry the
+      #   X-Hub-Locator-Capability: locator-v1 header (sent by
+      #   locator-aware agent-hub versions).
       # - AGENT_DEPLOYER_RUNTIME_EXPOSE=private
       #   + AGENT_DEPLOYER_RUNTIME_BIND_IP=<RFC1918 private IPv4>
-      # Optional overrides / probe:
-      # - AGENT_DEPLOYER_UPSTREAM_HOST=<private IPv4 or host.docker.internal>
+      # Optional:
       # - AGENT_DEPLOYER_UPSTREAM_PROBE=true
     volumes:
       # Control the host Docker daemon from inside the deployer

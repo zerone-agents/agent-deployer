@@ -39,10 +39,13 @@ http://<host>:<port>/api/v1
 
 ### Authentication
 
-Authentication is controlled by the server-side environment variable `AGENT_DEPLOYER_API_KEY`:
+Authentication is controlled by two server-side environment variables:
 
-- **Not set (empty)**: authentication is disabled; all `/api/v1/*` endpoints are directly accessible. Recommended only for local development.
-- **Set**: every request must carry one of the following headers; the server uses constant-time comparison (to prevent timing attacks):
+- `AGENT_DEPLOYER_API_KEY` — the general key for ordinary clients.
+- `AGENT_DEPLOYER_HUB_API_KEY` — the hub-scoped key for agent-hub. Either key authenticates a request, but only the hub key marks it hub-scoped, which is the **only** scope ever served the trusted `upstream` locator (non-public expose modes; see [Runtime Network Topologies](#runtime-network-topologies)). The two keys must differ.
+
+- **Both not set (empty)**: authentication is disabled; all `/api/v1/*` endpoints are directly accessible. Recommended only for local development (public mode). Config validation rejects non-public expose modes without a hub key.
+- **Any set**: every request must carry one of the following headers; the server uses constant-time comparison (to prevent timing attacks):
 
 | Header | Format | Example |
 |---|---|---|
@@ -575,27 +578,28 @@ the resulting upstream locator.
 | Mode | Port publish | Upstream locator | Required env |
 |------|--------------|------------------|--------------|
 | `public` (default) | dynamic port on `0.0.0.0` | none emitted | — |
-| `loopback` | dynamic port on `127.0.0.1` | `http://127.0.0.1:<port>` (or `AGENT_DEPLOYER_UPSTREAM_HOST`) | `AGENT_DEPLOYER_API_KEY` |
-| `docker-network` | none | `http://<container-name>:<container-port>` via Docker DNS | `AGENT_DEPLOYER_API_KEY`, `AGENT_DEPLOYER_RUNTIME_NETWORK`, `AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY=locator-v1` |
-| `private` | dynamic port on `AGENT_DEPLOYER_RUNTIME_BIND_IP` | `http://<bind-ip>:<port>` (or `AGENT_DEPLOYER_UPSTREAM_HOST`) | `AGENT_DEPLOYER_API_KEY`, `AGENT_DEPLOYER_RUNTIME_BIND_IP` |
+| `loopback` | dynamic port on `127.0.0.1` | `http://127.0.0.1:<port>` | `AGENT_DEPLOYER_HUB_API_KEY` |
+| `docker-network` | none | `http://<container-name>:<container-port>` via Docker DNS | `AGENT_DEPLOYER_HUB_API_KEY`, `AGENT_DEPLOYER_RUNTIME_NETWORK` |
+| `private` | dynamic port on `AGENT_DEPLOYER_RUNTIME_BIND_IP` | `http://<bind-ip>:<port>` | `AGENT_DEPLOYER_HUB_API_KEY`, `AGENT_DEPLOYER_RUNTIME_BIND_IP` |
 
 Notes:
-- **Authenticated boundary (all non-public modes):** `AGENT_DEPLOYER_API_KEY`
-  must be set — with an empty key the auth middleware is a no-op, and the
-  trusted locator (container DNS / private addresses) would be served to any
-  caller. The deployer refuses to start a non-public mode without a key.
+- **Hub-scoped boundary (all non-public modes):** `AGENT_DEPLOYER_HUB_API_KEY`
+  must be set and must differ from `AGENT_DEPLOYER_API_KEY`. Only requests
+  authenticated with the hub key are served the `upstream` /
+  `upstreamReachable` fields — general-key (ordinary-client) callers get the
+  same responses with the locator stripped, so it never enters
+  ordinary-client DTOs.
+- **Capability-gated creates (`docker-network` mode only):** creating a
+  portless runtime requires the request to carry the versioned capability
+  header `X-Hub-Locator-Capability: locator-v1`, sent by locator-aware
+  agent-hub versions. A pre-locator hub never sends it, so its creates fail
+  with HTTP 400 instead of stranding runtimes behind unreachable addresses —
+  this is the mixed-version guard.
 - **Private stays private:** `AGENT_DEPLOYER_RUNTIME_BIND_IP` accepts only
   IPv4 RFC1918 literals (10/8, 172.16/12, 192.168/16). Public, loopback,
   wildcard and IPv6 addresses are rejected, so the locator can never point at
-  a public host. `AGENT_DEPLOYER_UPSTREAM_HOST` accepts only a private IPv4
-  literal or the fixed `host.docker.internal` gateway name — arbitrary
-  hostnames cannot be verified to resolve inside the private network.
-- **Hub capability credential (`docker-network` mode only):**
-  `AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY` must be set to exactly `locator-v1`,
-  the versioned marker exported by locator-aware agent-hub deployments (hub
-  config: `AGENT_HUB_LOCATOR_CAPABILITY`). A pre-locator hub cannot produce
-  the value, so the deployer refuses to start — an old hub never silently
-  loses runtime reachability by entering the no-published-port mode.
+  a public host. The locator host is always the exact bind address — no
+  override exists.
 - `hostPort` in responses always reflects the host published port; `0` is a
   legal running state in `docker-network` mode.
 - The locator is re-derived on every request from live container state. After
@@ -607,13 +611,14 @@ Notes:
   shared network: they get **no** locator (fail closed) and must be recreated
   with `force: true`.
 - The deployer refuses to start in `docker-network` mode when the configured
-  network does not exist or the hub capability credential is missing/wrong.
+  network does not exist.
 - Upgrade order with agent-hub: upgrade the hub to a locator-aware version
-  **first** (its deployment exports `AGENT_HUB_LOCATOR_CAPABILITY=locator-v1`),
-  then switch this deployer to `docker-network` mode presenting that value,
-  then force-redeploy existing agents (`force: true`) so they attach to the
-  shared network and receive a locator, then close the runtime dynamic port
-  range (32768-60999) in the host firewall/security group.
+  **first** (it authenticates with the hub key and sends the
+  `X-Hub-Locator-Capability` header on deploy requests), then switch this
+  deployer to `docker-network` mode, then force-redeploy existing agents
+  (`force: true`) so they attach to the shared network and receive a locator,
+  then close the runtime dynamic port range (32768-60999) in the host
+  firewall/security group.
 
 ---
 

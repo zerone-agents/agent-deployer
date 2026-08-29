@@ -111,11 +111,10 @@ curl -X DELETE 'http://localhost:8080/api/v1/agents/coder?removeData=true'
 | `AGENT_DEPLOYER_API_KEY` | 否 | — | 设置后所有 `/api/v1/*` 端点都需要认证。客户端需在请求中带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。未设置时认证关闭（仅本地开发使用）。 |
 | `AGENT_DEPLOYER_CONTAINER_CPUS` | 否 | `2` | 每个 runtime 容器分配的 CPU 核数（如 `1.5`）。设为 `0` 表示不限。 |
 | `AGENT_DEPLOYER_CONTAINER_MEMORY` | 否 | `2048` | 每个 runtime 容器的内存上限（MB）。设为 `0` 表示不限。 |
-| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | 否 | `public` | runtime 容器网络拓扑：`public` / `loopback` / `docker-network` / `private`。纯服务端配置——决定 runtime 容器的可达方式，以及响应是否携带服务端生成的 `upstream` 定位信息。所有非 `public` 模式都要求设置 `AGENT_DEPLOYER_API_KEY`（定位信息的鉴权边界）。 |
+| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | 否 | `public` | runtime 容器网络拓扑：`public` / `loopback` / `docker-network` / `private`。纯服务端配置——决定 runtime 容器的可达方式，以及响应是否携带服务端生成的 `upstream` 定位信息。所有非 `public` 模式都要求设置 `AGENT_DEPLOYER_HUB_API_KEY`（定位信息的 hub 专属鉴权边界）。 |
 | `AGENT_DEPLOYER_RUNTIME_BIND_IP` | 仅 private 模式 | — | runtime 端口发布到的宿主 IP。仅在 `AGENT_DEPLOYER_RUNTIME_EXPOSE=private` 下必填（且只在该模式下有效）；必须是 IPv4 RFC1918 私网地址（拒绝公网、loopback、通配与 IPv6 地址）。 |
 | `AGENT_DEPLOYER_RUNTIME_NETWORK` | 仅 docker-network 模式 | — | runtime 容器接入的共享 Docker 网络。仅在 `AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network` 下必填（且只在该模式下有效）。 |
-| `AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY` | 仅 docker-network 模式 | — | 进入 docker-network 模式所需的 Hub 能力凭据；必须精确等于 `locator-v1`——即支持 locator 的新版 agent-hub 部署导出的版本化标记（hub 侧配置 `AGENT_HUB_LOCATOR_CAPABILITY`）。旧版 hub 无法提供该值，deployer 因此拒绝启动。 |
-| `AGENT_DEPLOYER_UPSTREAM_HOST` | 否 | — | 覆盖返回的 `upstream` 定位信息中的 host。仅在 `loopback` / `private` 模式下有效；只接受私网 IPv4 字面量或固定的 `host.docker.internal` 网关名。 |
+| `AGENT_DEPLOYER_HUB_API_KEY` | 非 public 模式 | — | agent-hub 专用的 hub-scoped API key；必须与 `AGENT_DEPLOYER_API_KEY` 不同。只有经此 key 鉴权的请求才会返回 `upstream` 定位信息——普通 key 调用方拿到的是剥除定位信息的响应。`docker-network` 模式下，部署请求还须携带 `X-Hub-Locator-Capability: locator-v1` 请求头（由支持 locator 的新版 hub 发送）。 |
 | `AGENT_DEPLOYER_UPSTREAM_PROBE` | 否 | — | 设为精确的 `true` 时，status 响应额外携带 `upstreamReachable`。`public` 模式下设置会被拒绝。 |
 
 docker-compose 部署方式还额外接受：
@@ -124,7 +123,7 @@ docker-compose 部署方式还额外接受：
 |---|---|---|
 | `AGENT_DEPLOYER_HOST_PORT` | `8080` | deployer HTTP server 对外暴露的宿主端口。 |
 
-运行时网络拓扑：`AGENT_DEPLOYER_RUNTIME_EXPOSE` 决定部署的 agent-runtime 容器如何被访问。默认 `public` 模式保持传统的 `0.0.0.0` 动态端口行为（不返回定位信息）；其他模式下 API 响应会额外携带服务端生成的 `upstream` 定位信息。完整的模式矩阵与关闭动态端口段的推荐升级顺序，见 API 参考中的 [Runtime Network Topologies](docs/API.md#runtime-network-topologies) 一节。
+运行时网络拓扑：`AGENT_DEPLOYER_RUNTIME_EXPOSE` 决定部署的 agent-runtime 容器如何被访问。默认 `public` 模式保持传统的 `0.0.0.0` 动态端口行为（不返回定位信息）；其他模式下，`upstream` 定位信息**只**提供给经 hub 专属 key（`AGENT_DEPLOYER_HUB_API_KEY`）鉴权的请求——普通 key 调用方拿到的是剥除定位信息的响应。完整的模式矩阵与关闭动态端口段的推荐升级顺序，见 API 参考中的 [Runtime Network Topologies](docs/API.md#runtime-network-topologies) 一节。
 
 ## API 参考
 
