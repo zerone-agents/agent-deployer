@@ -111,7 +111,7 @@ curl -X DELETE 'http://localhost:8080/api/v1/agents/coder?removeData=true'
 | `AGENT_DEPLOYER_API_KEY` | 否 | — | 设置后所有 `/api/v1/*` 端点都需要认证。客户端需在请求中带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。未设置时认证关闭（仅本地开发使用）。 |
 | `AGENT_DEPLOYER_CONTAINER_CPUS` | 否 | `2` | 每个 runtime 容器分配的 CPU 核数（如 `1.5`）。设为 `0` 表示不限。 |
 | `AGENT_DEPLOYER_CONTAINER_MEMORY` | 否 | `2048` | 每个 runtime 容器的内存上限（MB）。设为 `0` 表示不限。 |
-| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | 否 | `public` | runtime 容器网络拓扑：`public` / `loopback` / `docker-network` / `private`。纯服务端配置——决定 runtime 容器的可达方式，以及响应是否携带服务端生成的 `upstream` 定位信息。所有非 `public` 模式都要求设置 `AGENT_DEPLOYER_HUB_API_KEY`（定位信息的 hub 专属鉴权边界）。 |
+| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | 否 | `public` | runtime 容器网络拓扑：`public` / `loopback` / `docker-network` / `private`。纯服务端配置——决定 runtime 容器的可达方式，以及响应是否携带服务端生成的 `upstream` 定位信息。所有非 `public` 模式都要求设置 `AGENT_DEPLOYER_HUB_API_KEY`（定位信息的 hub 专属鉴权边界）。注意 `loopback` 模式要求 hub 以同宿主机进程运行（或容器共享宿主机网络命名空间）——普通容器内的 `127.0.0.1` 指向容器自身，应改用 `docker-network` 或 `private` 模式。 |
 | `AGENT_DEPLOYER_RUNTIME_BIND_IP` | 仅 private 模式 | — | runtime 端口发布到的宿主 IP。仅在 `AGENT_DEPLOYER_RUNTIME_EXPOSE=private` 下必填（且只在该模式下有效）；必须是 IPv4 RFC1918 私网地址（拒绝公网、loopback、通配与 IPv6 地址）。 |
 | `AGENT_DEPLOYER_RUNTIME_NETWORK` | 仅 docker-network 模式 | — | runtime 容器接入的共享 Docker 网络。仅在 `AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network` 下必填（且只在该模式下有效）。 |
 | `AGENT_DEPLOYER_HUB_API_KEY` | 非 public 模式 | — | agent-hub 专用的 hub-scoped API key；必须与 `AGENT_DEPLOYER_API_KEY` 不同。只有经此 key 鉴权的请求才会返回 `upstream` 定位信息——普通 key 调用方拿到的是剥除定位信息的响应。`docker-network` 模式下，部署请求还须携带 `X-Hub-Locator-Capability: locator-v1` 请求头（由支持 locator 的新版 hub 发送）。 |

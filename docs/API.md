@@ -598,6 +598,12 @@ Notes:
   value get HTTP 400. A pre-locator hub never sends it, so its creates fail
   fast instead of stranding runtimes behind unreachable addresses — this is
   the mixed-version guard.
+- **Loopback reachability:** `loopback` mode assumes the hub runs as a
+  same-host process (or a container sharing the host network namespace).
+  A regular Docker container's `127.0.0.1` is its own loopback — a hub
+  container that does not share the host network namespace cannot reach
+  ports published on the host loopback. Use `docker-network` or `private`
+  mode there instead.
 - **Private stays private:** `AGENT_DEPLOYER_RUNTIME_BIND_IP` accepts only
   IPv4 RFC1918 literals (10/8, 172.16/12, 192.168/16). Public, loopback,
   wildcard and IPv6 addresses are rejected, so the locator can never point at
