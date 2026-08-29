@@ -6,11 +6,13 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/zerone-agent/agent-deployer/internal/config"
 	"github.com/zerone-agent/agent-deployer/internal/model"
 	"github.com/zerone-agent/agent-deployer/internal/service"
 	"github.com/zerone-agent/agent-deployer/internal/skills"
@@ -69,6 +71,20 @@ func stripStatusUpstream(c *gin.Context, resp *model.AgentStatusResponse) {
 //   - 502 on skill download upstream failure
 //   - 500 on internal failure
 func (h *AgentHandler) Create(c *gin.Context) {
+	// docker-network mode publishes no host ports, so the only caller that
+	// may create portless runtimes is a locator-aware hub, proven by the
+	// versioned capability header observed on this authenticated request
+	// (issue #11 acceptance #9). A pre-locator hub never sends it, so its
+	// creates fail fast instead of stranding runtimes behind unreachable
+	// addresses.
+	if h.svc.Config().RuntimeExpose == config.ExposeDockerNetwork &&
+		c.GetHeader("X-Hub-Locator-Capability") != config.HubLocatorCapability {
+		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: fmt.Sprintf(
+			"X-Hub-Locator-Capability header must be %q in docker-network mode: upgrade agent-hub to a locator-aware version before deploying portless runtimes",
+			config.HubLocatorCapability)})
+		return
+	}
+
 	var req model.CreateAgentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: err.Error()})

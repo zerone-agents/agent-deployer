@@ -21,7 +21,6 @@ type Config struct {
 	RuntimeBindIP        string        // private mode: RFC1918 IPv4 the runtime ports bind to
 	RuntimeNetwork       string        // docker-network mode: shared Docker network name
 	UpstreamProbe        bool          // dial the locator in GET status (non-public modes only)
-	HubLocatorCapability string        // docker-network mode: versioned hub capability credential (startup gate only)
 	HubAPIKey            string        // hub-scoped API key: the only scope served the upstream locator (required in non-public modes)
 }
 
@@ -44,12 +43,12 @@ const (
 )
 
 // HubLocatorCapability is the versioned capability marker a locator-aware
-// agent-hub deployment exports in its configuration (as
-// AGENT_HUB_LOCATOR_CAPABILITY=locator-v1). Entering docker-network mode —
-// which publishes no host ports — requires presenting this exact value via
-// AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY. A pre-locator hub deployment cannot
-// produce the value, so the deployer refuses to start and old hubs never
-// silently lose runtime reachability (issue #11 acceptance #9).
+// agent-hub sends on authenticated deploy requests via the
+// X-Hub-Locator-Capability header. Creating the no-published-port runtimes
+// of docker-network mode is only allowed once this exact value is observed
+// on the request; a pre-locator hub never sends it, so its creates fail
+// fast instead of stranding runtimes behind unreachable addresses
+// (issue #11 acceptance #9).
 const HubLocatorCapability = "locator-v1"
 
 // isPrivateIPv4 reports whether s is an IPv4 literal in an RFC1918 private
@@ -190,20 +189,6 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AGENT_DEPLOYER_API_KEY and AGENT_DEPLOYER_HUB_API_KEY must differ: a shared key would make every caller hub-scoped and defeat the locator trust boundary (issue #11)")
 	}
 
-	// docker-network mode publishes no host ports, so it is only viable with
-	// a locator-aware hub. The capability credential below exists only in
-	// locator-aware agent-hub deployment configurations; without it the
-	// deployer refuses to start, so an old hub can never silently strand the
-	// runtimes it manages (issue #11 acceptance #9).
-	hubCapability := strings.TrimSpace(os.Getenv("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY"))
-	if expose == ExposeDockerNetwork {
-		if hubCapability != HubLocatorCapability {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY must be set to %q when AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network: the value is exported by locator-aware agent-hub deployments, and refusing to start without it keeps pre-locator hubs from silently losing runtime access (issue #11)", HubLocatorCapability)
-		}
-	} else if hubCapability != "" {
-		return nil, fmt.Errorf("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY is only valid with AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network")
-	}
-
 	return &Config{
 		DataDir:              dataDir,
 		Port:                 port,
@@ -217,6 +202,5 @@ func Load() (*Config, error) {
 		RuntimeBindIP:        bindIP,
 		RuntimeNetwork:       runtimeNetwork,
 		UpstreamProbe:        upstreamProbe,
-		HubLocatorCapability: hubCapability,
 	}, nil
 }

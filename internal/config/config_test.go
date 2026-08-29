@@ -185,7 +185,6 @@ func TestLoad_DockerNetworkRequiresNetwork(t *testing.T) {
 func TestLoad_DockerNetworkMode(t *testing.T) {
 	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
 	t.Setenv("AGENT_DEPLOYER_HUB_API_KEY", "test-hub-key")
-	t.Setenv("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY", "locator-v1")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
 	cfg, err := Load()
@@ -239,7 +238,6 @@ func TestLoad_NonPublicModeRequiresHubAPIKey(t *testing.T) {
 		"docker-network": func(t *testing.T) {
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
-			t.Setenv("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY", "locator-v1")
 		},
 		"general key set but no hub key": func(t *testing.T) {
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
@@ -286,51 +284,4 @@ func TestLoad_PublicModeStillWorksWithoutAPIKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", cfg.APIKey)
 	assert.Equal(t, ExposePublic, cfg.RuntimeExpose)
-}
-
-// --- PR #12 review P1-3: hub locator capability credential ---
-
-func TestLoad_DockerNetworkRequiresHubCapability(t *testing.T) {
-	// docker-network mode publishes no host ports, so starting it against a
-	// pre-locator hub would silently strand every runtime. Entry requires the
-	// versioned capability marker exported by locator-aware agent-hub
-	// deployments — an old hub cannot produce it (issue #11 acceptance #9).
-	base := func(t *testing.T) {
-		t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-		t.Setenv("AGENT_DEPLOYER_HUB_API_KEY", "test-hub-key")
-		t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
-		t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
-	}
-
-	t.Run("missing", func(t *testing.T) {
-		base(t)
-		_, err := Load()
-		require.Error(t, err, "docker-network without the hub capability must refuse to start")
-		assert.Contains(t, err.Error(), "AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY")
-	})
-
-	t.Run("wrong value", func(t *testing.T) {
-		base(t)
-		t.Setenv("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY", "yes")
-		_, err := Load()
-		require.Error(t, err, "a guessed capability value must be rejected")
-		assert.Contains(t, err.Error(), "AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY")
-	})
-
-	t.Run("correct value", func(t *testing.T) {
-		base(t)
-		t.Setenv("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY", "locator-v1")
-		cfg, err := Load()
-		require.NoError(t, err)
-		assert.Equal(t, HubLocatorCapability, cfg.HubLocatorCapability)
-	})
-}
-
-func TestLoad_HubCapabilityOnlyValidInDockerNetwork(t *testing.T) {
-	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-	t.Setenv("AGENT_DEPLOYER_HUB_API_KEY", "test-hub-key")
-	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
-	t.Setenv("AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY", "locator-v1")
-	_, err := Load()
-	require.Error(t, err, "capability set outside docker-network mode must fail")
 }

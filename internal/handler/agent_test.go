@@ -55,8 +55,14 @@ func (f *fakeDockerForHandler) ListManagedContainers(_ context.Context) ([]docke
 }
 
 func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts docker.CreateOpts) (string, int, error) {
-	port := f.nextPort
-	f.nextPort++
+	// Faithful to the topology opts: an empty BindHost means publish
+	// nothing (docker-network mode) and a NetworkName attaches the
+	// container to that network.
+	port := 0
+	if opts.BindHost != "" {
+		port = f.nextPort
+		f.nextPort++
+	}
 	c := &docker.RuntimeContainer{
 		ID:         "cid-" + opts.AgentName,
 		Name:       opts.ContainerName,
@@ -65,6 +71,9 @@ func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts dock
 		Status:     "running",
 		HostPort:   port,
 		Image:      opts.Image,
+	}
+	if opts.NetworkName != "" {
+		c.Networks = []string{opts.NetworkName}
 	}
 	f.containers[opts.AgentName] = c
 	f.tokens[c.ID] = opts.RuntimeToken
@@ -876,6 +885,65 @@ func TestUpstream_OnlyServedToHubScope(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code, "path %s: %s", path, w.Body.String())
 		assert.NotContains(t, w.Body.String(), "upstream", "ordinary-key %s must never carry the locator", path)
 	}
+}
+
+func TestCreate_DockerNetworkMode_RequiresCapabilityHeader(t *testing.T) {
+	// Mixed-version guard (issue #11 acceptance #9, PR #12 review round 2):
+	// a pre-locator hub never sends the capability header, so Create in
+	// docker-network mode refuses to deploy a portless runtime instead of
+	// stranding it behind an unreachable address.
+	newRouter := func(t *testing.T) *gin.Engine {
+		r, _ := setupTestRouterWithConfig(t, &config.Config{
+			RuntimeExpose:  config.ExposeDockerNetwork,
+			RuntimeNetwork: "hubnet",
+			HubAPIKey:      "hub-key",
+		})
+		return r
+	}
+	doCreate := func(t *testing.T, r *gin.Engine, capability string) *httptest.ResponseRecorder {
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "hub-key")
+		if capability != "" {
+			req.Header.Set("X-Hub-Locator-Capability", capability)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	t.Run("old hub: header absent", func(t *testing.T) {
+		w := doCreate(t, newRouter(t), "")
+		assert.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+		assert.Contains(t, w.Body.String(), "X-Hub-Locator-Capability")
+	})
+
+	t.Run("old hub: stale capability value", func(t *testing.T) {
+		w := doCreate(t, newRouter(t), "v0")
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("locator-aware hub: creates portless runtime", func(t *testing.T) {
+		w := doCreate(t, newRouter(t), "locator-v1")
+		require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+		var resp struct {
+			Data model.AgentResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, 0, resp.Data.HostPort, "docker-network mode publishes no host port")
+		require.NotNil(t, resp.Data.Upstream, "hub-scoped create with capability must carry the locator")
+		assert.Equal(t, resp.Data.ContainerName, resp.Data.Upstream.Host)
+	})
+
+	t.Run("public mode ignores the header", func(t *testing.T) {
+		r, _, _ := setupTestRouter(t) // public topology: no capability gate
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Hub-Locator-Capability", "locator-v1")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+	})
 }
 
 func TestStatus_PublicMode_ResponseOmitsUpstreamKey(t *testing.T) {
