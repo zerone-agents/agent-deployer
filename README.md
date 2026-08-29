@@ -111,12 +111,19 @@ All variables are read by the deployer on startup.
 | `AGENT_DEPLOYER_API_KEY` | no | — | When set, all `/api/v1/*` endpoints require authentication. Clients must send `Authorization: Bearer <key>` or `X-API-Key: <key>`. When empty, auth is disabled (local dev only). |
 | `AGENT_DEPLOYER_CONTAINER_CPUS` | no | `2` | CPU cores allocated to each runtime container (e.g. `1.5`). Set to `0` for unlimited. |
 | `AGENT_DEPLOYER_CONTAINER_MEMORY` | no | `2048` | Memory limit per runtime container in MB. Set to `0` for unlimited. |
+| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | no | `public` | Runtime container network topology: `public` / `loopback` / `docker-network` / `private`. Server-side only — determines how runtime containers are reached and whether responses include the server-generated `upstream` locator. |
+| `AGENT_DEPLOYER_RUNTIME_BIND_IP` | private mode only | — | Host IP that runtime ports are published on. Required (and only valid) with `AGENT_DEPLOYER_RUNTIME_EXPOSE=private`; must be a specific routable IP (loopback and wildcard are rejected). |
+| `AGENT_DEPLOYER_RUNTIME_NETWORK` | docker-network mode only | — | Shared Docker network that runtime containers join. Required (and only valid) with `AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network`. |
+| `AGENT_DEPLOYER_UPSTREAM_HOST` | no | — | Overrides the host in the returned `upstream` locator. Only valid in `loopback` / `private` modes (e.g. `host.docker.internal`). |
+| `AGENT_DEPLOYER_UPSTREAM_PROBE` | no | — | Set to exactly `true` to include `upstreamReachable` in status responses. Rejected in `public` mode. |
 
 The docker-compose deployment additionally accepts:
 
 | Variable | Default | Description |
 |---|---|---|
 | `AGENT_DEPLOYER_HOST_PORT` | `8080` | Host port to publish for the deployer HTTP server. |
+
+Runtime network topology: `AGENT_DEPLOYER_RUNTIME_EXPOSE` selects how deployed agent-runtime containers are reached. The default `public` mode keeps the legacy `0.0.0.0` dynamic-port behavior (no locator); the other modes additionally return a server-generated `upstream` locator in API responses. See [Runtime Network Topologies](docs/API.md#runtime-network-topologies) in the API reference for the full mode matrix and the recommended upgrade order for closing the dynamic port range.
 
 ## API reference
 

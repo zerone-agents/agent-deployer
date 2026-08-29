@@ -20,6 +20,7 @@ agent-deployer is a service that manages the lifecycle of [open-agent-runtime](.
   - [8. Delete Agent](#8-delete-agent)
 - [Data Models](#data-models)
 - [Provider Field Mapping](#provider-field-mapping)
+- [Runtime Network Topologies](#runtime-network-topologies)
 - [Typical Workflow](#typical-workflow)
 - [Troubleshooting](#troubleshooting)
 
@@ -184,11 +185,12 @@ curl -X POST "$DEPLOYER/agents" \
 | `containerId` | string | Full Docker container ID |
 | `containerName` | string | Docker container name, of the form `cloud-agent-<name>-<instanceId>` |
 | `status` | string | Status enum, see [AgentStatus](#agentstatus) |
-| `hostPort` | int | Port mapped to the host (the runtime's internal container port is fixed, controlled by `AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT`, default 3000) |
+| `hostPort` | int | Port mapped to the host (the runtime's internal container port is fixed, controlled by `AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT`, default 3000). `0` when the topology publishes no host port — a legal running state in `docker-network` mode |
 | `createdAt` | string | RFC3339 UTC timestamp |
 | `yamlPath` | string | Path to this agent's YAML configuration (mounted into the container at `/app/config`) |
 | `sessionDir` | string | Session persistence directory (mounted into the container at `/root/.agents`) |
 | `skillsDir` | string | Skills directory (returned only when skills are declared, copied into `/workdir/.agents/skills`) |
+| `upstream` | object | Server-generated upstream locator, `{ "scheme": "http", "host": "<container-dns-or-ip>", "port": <port> }`. Only present when the server runs a non-public `AGENT_DEPLOYER_RUNTIME_EXPOSE` mode; derived solely from server-side topology configuration — no request field can influence it. See [Runtime Network Topologies](#runtime-network-topologies) |
 
 > **Note**: the returned `hostPort` is stable only for the lifetime of the container. The port changes after a container rebuild, so always query it again each time.
 
@@ -255,6 +257,8 @@ curl "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 }
 ```
 
+> In non-public `AGENT_DEPLOYER_RUNTIME_EXPOSE` modes the response additionally carries a server-generated `upstream` object (same shape as in [§1](#1-create-agent), see [Runtime Network Topologies](#runtime-network-topologies)). It is absent from the example above because the default `public` mode emits no locator.
+
 #### Failure Response
 
 - `404`: `{ "success": false, "error": "agent \"coder\": agent not found" }`
@@ -296,6 +300,8 @@ curl "$DEPLOYER/agents/coder/status" ${API_KEY:+-H "Authorization: Bearer $API_K
 | `status` | Native Docker state: `running` / `created` / `exited` / `paused`, etc. |
 | `health` | Docker health check: `starting` / `healthy` / `unhealthy` / `none` (when no health check is configured or inspect fails) |
 | `image` | Image name used by the container |
+| `upstream` | Server-generated upstream locator, present only in non-public `AGENT_DEPLOYER_RUNTIME_EXPOSE` modes (same shape as in [§1](#1-create-agent), see [Runtime Network Topologies](#runtime-network-topologies)) |
+| `upstreamReachable` | Boolean; present only when the server is configured with `AGENT_DEPLOYER_UPSTREAM_PROBE=true` — whether the deployer's TCP probe of `upstream` succeeded |
 
 > Difference from [§3](#3-get-agent-details): this endpoint additionally runs a `docker inspect` to obtain the health check result; if the inspect fails, it degrades to `health=none` instead of returning an error.
 
@@ -528,6 +534,7 @@ The data structure returned by `POST /agents`, `GET /agents/:name`, and `GET /ag
 | `sessionDir` | string | `POST` only | |
 | `skillsDir` | string | `POST` only, and only when skills are declared | |
 | `runtimeToken` | string | `POST` only | Token provided by the caller, identical to the `ZERONE_AGENT_HTTP_API_KEY` injected into the container; not returned by Get / List |
+| `upstream` | object | Non-public `AGENT_DEPLOYER_RUNTIME_EXPOSE` modes only | Server-generated locator `{ "scheme": "http", "host": "<container-dns-or-ip>", "port": <port> }`; re-derived per request from live container state, never influenced by client input. See [Runtime Network Topologies](#runtime-network-topologies) |
 
 ### AgentStatus
 
@@ -556,6 +563,35 @@ At creation time, `provider` credentials are written into the main agent entry o
 | `provider.lockedApiKey` | `apiKey` | Written to disk in plaintext under dataDir with mode 0644 (comparable in risk to env vars visible via `docker inspect`) |
 
 The only `ZERONE_AGENT_*` environment variable injected into the container is `ZERONE_AGENT_HTTP_API_KEY` (from the request's `runtime_token`), used for the runtime's own HTTP API authentication; it is unrelated to model credentials.
+
+---
+
+## Runtime Network Topologies
+
+`AGENT_DEPLOYER_RUNTIME_EXPOSE` selects how agent-runtime containers are
+reached. It is server-side configuration only — clients can never influence
+the resulting upstream locator.
+
+| Mode | Port publish | Upstream locator | Required env |
+|------|--------------|------------------|--------------|
+| `public` (default) | dynamic port on `0.0.0.0` | none emitted | — |
+| `loopback` | dynamic port on `127.0.0.1` | `http://127.0.0.1:<port>` (or `AGENT_DEPLOYER_UPSTREAM_HOST`) | — |
+| `docker-network` | none | `http://<container-name>:<container-port>` via Docker DNS | `AGENT_DEPLOYER_RUNTIME_NETWORK` |
+| `private` | dynamic port on `AGENT_DEPLOYER_RUNTIME_BIND_IP` | `http://<bind-ip>:<port>` (or `AGENT_DEPLOYER_UPSTREAM_HOST`) | `AGENT_DEPLOYER_RUNTIME_BIND_IP` |
+
+Notes:
+- `hostPort` in responses always reflects the host published port; `0` is a
+  legal running state in `docker-network` mode.
+- The locator is re-derived on every request from live container state. After
+  `force` redeploy the old locator stops being returned automatically.
+- Containers created before switching to `docker-network` mode are not on the
+  shared network: they get **no** locator (fail closed) and must be recreated
+  with `force: true`.
+- The deployer refuses to start in `docker-network` mode when the configured
+  network does not exist.
+- Upgrade order with agent-hub: upgrade the hub to a locator-aware version
+  **first**, then switch this deployer to `docker-network` mode, then close the
+  runtime dynamic port range (32768-60999) in the host firewall/security group.
 
 ---
 
