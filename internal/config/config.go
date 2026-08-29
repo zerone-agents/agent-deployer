@@ -2,9 +2,13 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+
+	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
 type Config struct {
@@ -13,9 +17,32 @@ type Config struct {
 	RuntimeImage         string
 	RuntimeContainerPort int
 	APIKey               string
-	ContainerMemoryBytes int64 // 0 = unlimited
-	ContainerNanoCPUs    int64 // 0 = unlimited
+	ContainerMemoryBytes int64         // 0 = unlimited
+	ContainerNanoCPUs    int64         // 0 = unlimited
+	RuntimeExpose        RuntimeExpose // default public
+	RuntimeBindIP        string        // private mode: host IP runtime ports bind to
+	RuntimeNetwork       string        // docker-network mode: shared Docker network name
+	UpstreamHost         string        // loopback/private mode: overrides locator host; "" = derive
+	UpstreamProbe        bool          // dial the locator in GET status (non-public modes only)
 }
+
+// RuntimeExpose selects how runtime container ports are exposed and how the
+// trusted upstream locator is derived (issue #11). It is chosen server-side
+// only — never inferred from client input.
+type RuntimeExpose string
+
+const (
+	// ExposePublic publishes dynamic host ports on 0.0.0.0 (legacy behavior,
+	// default). No upstream locator is emitted in responses.
+	ExposePublic RuntimeExpose = "public"
+	// ExposeLoopback publishes dynamic host ports on 127.0.0.1 only.
+	ExposeLoopback RuntimeExpose = "loopback"
+	// ExposeDockerNetwork publishes no host ports; runtimes are reached via
+	// container DNS on a shared Docker network.
+	ExposeDockerNetwork RuntimeExpose = "docker-network"
+	// ExposePrivate publishes dynamic host ports on a configured private IP.
+	ExposePrivate RuntimeExpose = "private"
+)
 
 func Load() (*Config, error) {
 	dataDir := os.Getenv("AGENT_DEPLOYER_DATA_DIR")
@@ -80,6 +107,57 @@ func Load() (*Config, error) {
 		containerMemoryMB = n
 	}
 
+	// Runtime expose topology (issue #11). Default public preserves the legacy
+	// behavior exactly: 0.0.0.0 dynamic ports and no upstream locator.
+	expose := ExposePublic
+	if v := os.Getenv("AGENT_DEPLOYER_RUNTIME_EXPOSE"); v != "" {
+		switch RuntimeExpose(v) {
+		case ExposePublic, ExposeLoopback, ExposeDockerNetwork, ExposePrivate:
+			expose = RuntimeExpose(v)
+		default:
+			return nil, fmt.Errorf("invalid AGENT_DEPLOYER_RUNTIME_EXPOSE %q: must be one of public, loopback, docker-network, private", v)
+		}
+	}
+
+	bindIP := os.Getenv("AGENT_DEPLOYER_RUNTIME_BIND_IP")
+	switch expose {
+	case ExposePrivate:
+		if bindIP == "" {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP is required when AGENT_DEPLOYER_RUNTIME_EXPOSE=private")
+		}
+		if ip := net.ParseIP(bindIP); ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP must be a specific routable IP, got %q", bindIP)
+		}
+	default:
+		if bindIP != "" {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP is only valid with AGENT_DEPLOYER_RUNTIME_EXPOSE=private")
+		}
+	}
+
+	runtimeNetwork := strings.TrimSpace(os.Getenv("AGENT_DEPLOYER_RUNTIME_NETWORK"))
+	if expose == ExposeDockerNetwork {
+		if runtimeNetwork == "" {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_NETWORK is required when AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network")
+		}
+	} else if runtimeNetwork != "" {
+		return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_NETWORK is only valid with AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network")
+	}
+
+	upstreamHost := strings.TrimSpace(os.Getenv("AGENT_DEPLOYER_UPSTREAM_HOST"))
+	if upstreamHost != "" {
+		if expose != ExposeLoopback && expose != ExposePrivate {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST is only valid with loopback or private expose modes")
+		}
+		if !model.ValidateUpstreamHost(upstreamHost) {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST must be a bare hostname or IP literal, got %q", upstreamHost)
+		}
+	}
+
+	upstreamProbe := os.Getenv("AGENT_DEPLOYER_UPSTREAM_PROBE") == "true"
+	if upstreamProbe && expose == ExposePublic {
+		return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_PROBE=true requires a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (no locator to probe in public mode)")
+	}
+
 	return &Config{
 		DataDir:              dataDir,
 		Port:                 port,
@@ -88,5 +166,10 @@ func Load() (*Config, error) {
 		APIKey:               os.Getenv("AGENT_DEPLOYER_API_KEY"),
 		ContainerMemoryBytes: containerMemoryMB * 1024 * 1024,
 		ContainerNanoCPUs:    int64(containerCPUs * 1e9),
+		RuntimeExpose:        expose,
+		RuntimeBindIP:        bindIP,
+		RuntimeNetwork:       runtimeNetwork,
+		UpstreamHost:         upstreamHost,
+		UpstreamProbe:        upstreamProbe,
 	}, nil
 }

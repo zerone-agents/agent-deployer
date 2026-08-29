@@ -101,3 +101,135 @@ func TestLoad_DataDirAbsolute(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must be an absolute path")
 }
+
+// --- issue #11: runtime expose topology ---
+
+func TestLoad_ExposeDefaultsToPublic(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, ExposePublic, cfg.RuntimeExpose)
+}
+
+func TestLoad_InvalidExposeValue(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "carrier-pigeon")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_DEPLOYER_RUNTIME_EXPOSE")
+}
+
+func TestLoad_LoopbackMode(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, ExposeLoopback, cfg.RuntimeExpose)
+}
+
+func TestLoad_LoopbackModeWithHostOverride(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "host.docker.internal")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "host.docker.internal", cfg.UpstreamHost)
+}
+
+func TestLoad_LoopbackRejectsBindIP(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", "10.0.0.1")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_DEPLOYER_RUNTIME_BIND_IP")
+}
+
+func TestLoad_PrivateModeRequiresBindIP(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_DEPLOYER_RUNTIME_BIND_IP")
+}
+
+func TestLoad_PrivateModeRejectsLoopbackOrWildcardIP(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "0.0.0.0", "not-an-ip"} {
+		t.Run(ip, func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", ip)
+			_, err := Load()
+			require.Error(t, err, "IP %q must be rejected", ip)
+		})
+	}
+}
+
+func TestLoad_PrivateModeAcceptsRoutableIP(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", "10.2.0.5")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "10.2.0.5", cfg.RuntimeBindIP)
+}
+
+func TestLoad_DockerNetworkRequiresNetwork(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AGENT_DEPLOYER_RUNTIME_NETWORK")
+}
+
+func TestLoad_DockerNetworkMode(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, ExposeDockerNetwork, cfg.RuntimeExpose)
+	assert.Equal(t, "hubnet", cfg.RuntimeNetwork)
+}
+
+func TestLoad_BindIPAndNetworkOnlyValidInTheirModes(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", "10.0.0.1")
+	_, err := Load()
+	require.Error(t, err, "BIND_IP without private mode must fail")
+
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", "")
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
+	_, err = Load()
+	require.Error(t, err, "RUNTIME_NETWORK without docker-network mode must fail")
+}
+
+func TestLoad_UpstreamHostOnlyValidInLoopbackOrPrivate(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "hub.internal")
+	_, err := Load()
+	require.Error(t, err, "UPSTREAM_HOST in public mode must fail")
+}
+
+func TestLoad_UpstreamHostRejectsGarbage(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "http://x:1")
+	_, err := Load()
+	require.Error(t, err)
+}
+
+func TestLoad_ProbeRequiresNonPublicMode(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_UPSTREAM_PROBE", "true")
+	_, err := Load()
+	require.Error(t, err, "probe in public mode has no locator to dial")
+
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+	t.Setenv("AGENT_DEPLOYER_UPSTREAM_PROBE", "true")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.UpstreamProbe)
+}
