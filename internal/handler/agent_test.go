@@ -136,6 +136,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *service.AgentService, *fakeDoc
 	h := handler.NewAgentHandler(svc)
 	r := gin.New()
 	api := r.Group("/api/v1")
+	api.Use(handler.AuthMiddleware(cfg.APIKey, cfg.HubAPIKey))
 	h.Register(api)
 	return r, svc, fakeDC
 }
@@ -159,7 +160,9 @@ func setupTestRouterWithConfig(t *testing.T, cfg *config.Config) (*gin.Engine, *
 	svc := service.NewAgentService(cfg, fakeDC)
 	h := handler.NewAgentHandler(svc)
 	r := gin.New()
-	h.Register(r.Group("/api/v1"))
+	api := r.Group("/api/v1")
+	api.Use(handler.AuthMiddleware(cfg.APIKey, cfg.HubAPIKey))
+	h.Register(api)
 	return r, fakeDC
 }
 
@@ -817,6 +820,7 @@ func TestStatus_DockerNetworkMode_IncludesUpstream(t *testing.T) {
 	r, fake := setupTestRouterWithConfig(t, &config.Config{
 		RuntimeExpose:  config.ExposeDockerNetwork,
 		RuntimeNetwork: "hubnet",
+		HubAPIKey:      "hub-key",
 	})
 	// Seed a live container as docker-network mode would have created it.
 	fake.containers["coder"] = &docker.RuntimeContainer{
@@ -829,9 +833,49 @@ func TestStatus_DockerNetworkMode_IncludesUpstream(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/api/v1/agents/coder/status", nil)
+	req.Header.Set("X-API-Key", "hub-key")
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"upstream":{"scheme":"http","host":"cloud-agent-coder-aaaaaaaa","port":3000}`)
+}
+
+func TestUpstream_OnlyServedToHubScope(t *testing.T) {
+	// The same docker-network deployment queried with the general key must
+	// not carry the locator: it never enters ordinary-client DTOs (issue #11,
+	// PR #12 review round 2).
+	r, fake := setupTestRouterWithConfig(t, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		APIKey:         "general-key",
+		HubAPIKey:      "hub-key",
+	})
+	fake.containers["coder"] = &docker.RuntimeContainer{
+		ID:        "cid-1",
+		Name:      "cloud-agent-coder-aaaaaaaa",
+		AgentName: "coder",
+		Status:    "running",
+		Networks:  []string{"hubnet"},
+	}
+
+	// Hub-scoped caller sees the locator on every locator-bearing endpoint.
+	for _, path := range []string{"/api/v1/agents", "/api/v1/agents/coder", "/api/v1/agents/coder/status"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "hub-key")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "path %s: %s", path, w.Body.String())
+		assert.Contains(t, w.Body.String(), `"upstream":`, "hub-scoped %s must carry the locator", path)
+	}
+
+	// General-key callers get the same resources with the locator stripped.
+	for _, path := range []string{"/api/v1/agents", "/api/v1/agents/coder", "/api/v1/agents/coder/status"} {
+		req, _ := http.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "general-key")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "path %s: %s", path, w.Body.String())
+		assert.NotContains(t, w.Body.String(), "upstream", "ordinary-key %s must never carry the locator", path)
+	}
 }
 
 func TestStatus_PublicMode_ResponseOmitsUpstreamKey(t *testing.T) {

@@ -40,6 +40,24 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 	g.DELETE("/:name", h.Delete)
 }
 
+// stripUpstream removes the trusted locator from an agent response unless
+// the request was authenticated with the hub-scoped key. The locator never
+// enters ordinary-client DTOs (issue #11).
+func stripUpstream(c *gin.Context, resp *model.AgentResponse) {
+	if !c.GetBool(ContextKeyHubScope) {
+		resp.Upstream = nil
+	}
+}
+
+// stripStatusUpstream is stripUpstream for the live-status payload; the
+// optional probe result goes with the locator.
+func stripStatusUpstream(c *gin.Context, resp *model.AgentStatusResponse) {
+	if !c.GetBool(ContextKeyHubScope) {
+		resp.Upstream = nil
+		resp.UpstreamReachable = nil
+	}
+}
+
 // Create handles POST /agents: validate the body, create the container, and
 // return the resulting agent description.
 //
@@ -77,6 +95,7 @@ func (h *AgentHandler) Create(c *gin.Context) {
 		return
 	}
 
+	stripUpstream(c, resp)
 	if created {
 		c.JSON(http.StatusCreated, model.SuccessResponse{Success: true, Data: resp})
 	} else {
@@ -100,6 +119,7 @@ func (h *AgentHandler) Get(c *gin.Context) {
 		c.JSON(status, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
 	}
+	stripUpstream(c, resp)
 	c.JSON(http.StatusOK, model.SuccessResponse{Success: true, Data: resp})
 }
 
@@ -116,6 +136,7 @@ func (h *AgentHandler) Status(c *gin.Context) {
 		c.JSON(status, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
 	}
+	stripStatusUpstream(c, resp)
 	c.JSON(http.StatusOK, model.SuccessResponse{Success: true, Data: resp})
 }
 
@@ -152,6 +173,9 @@ func (h *AgentHandler) List(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
+	}
+	for i := range resp {
+		stripUpstream(c, &resp[i])
 	}
 	c.JSON(http.StatusOK, model.SuccessResponse{Success: true, Data: resp})
 }

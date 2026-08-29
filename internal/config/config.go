@@ -22,6 +22,7 @@ type Config struct {
 	RuntimeNetwork       string        // docker-network mode: shared Docker network name
 	UpstreamProbe        bool          // dial the locator in GET status (non-public modes only)
 	HubLocatorCapability string        // docker-network mode: versioned hub capability credential (startup gate only)
+	HubAPIKey            string        // hub-scoped API key: the only scope served the upstream locator (required in non-public modes)
 }
 
 // RuntimeExpose selects how runtime container ports are exposed and how the
@@ -167,13 +168,26 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_PROBE=true requires a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (no locator to probe in public mode)")
 	}
 
-	// Locator-bearing topologies require an authenticated boundary: with no
-	// API key the auth middleware is a no-op, and every caller would see
-	// container DNS / private addresses in responses (issue #11, trust
-	// boundary). Public mode keeps the frictionless dev default.
+	// Hub-scoped authentication boundary: in non-public topologies the
+	// trusted locator is only served to hub-scoped callers, so a dedicated
+	// hub key — distinct from the general API key — is required. Public mode
+	// must not configure one: it emits no locator, and a hub key there would
+	// be a no-op credential.
+	hubAPIKey := os.Getenv("AGENT_DEPLOYER_HUB_API_KEY")
+	if expose != ExposePublic {
+		if strings.TrimSpace(hubAPIKey) == "" {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_HUB_API_KEY must be set when AGENT_DEPLOYER_RUNTIME_EXPOSE is not public: the trusted upstream locator is only served to hub-scoped callers (issue #11)")
+		}
+	} else if hubAPIKey != "" {
+		return nil, fmt.Errorf("AGENT_DEPLOYER_HUB_API_KEY is only valid with a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (public mode emits no locator)")
+	}
+
+	// The general key serves ordinary clients, which never receive the
+	// locator; a shared value would make every caller hub-scoped and defeat
+	// the boundary.
 	apiKey := os.Getenv("AGENT_DEPLOYER_API_KEY")
-	if expose != ExposePublic && apiKey == "" {
-		return nil, fmt.Errorf("AGENT_DEPLOYER_API_KEY must be set when AGENT_DEPLOYER_RUNTIME_EXPOSE is not public: non-public topologies emit the trusted upstream locator, which must only be served to authenticated callers (issue #11)")
+	if apiKey != "" && apiKey == hubAPIKey {
+		return nil, fmt.Errorf("AGENT_DEPLOYER_API_KEY and AGENT_DEPLOYER_HUB_API_KEY must differ: a shared key would make every caller hub-scoped and defeat the locator trust boundary (issue #11)")
 	}
 
 	// docker-network mode publishes no host ports, so it is only viable with
@@ -196,6 +210,7 @@ func Load() (*Config, error) {
 		RuntimeImage:         runtimeImage,
 		RuntimeContainerPort: containerPort,
 		APIKey:               apiKey,
+		HubAPIKey:            hubAPIKey,
 		ContainerMemoryBytes: containerMemoryMB * 1024 * 1024,
 		ContainerNanoCPUs:    int64(containerCPUs * 1e9),
 		RuntimeExpose:        expose,

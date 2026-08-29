@@ -48,11 +48,11 @@ func main() {
 	r := gin.Default()
 	r.GET("/health", handler.Health)
 	api := r.Group("/api/v1")
-	api.Use(handler.AuthMiddleware(cfg.APIKey))
+	api.Use(handler.AuthMiddleware(cfg.APIKey, cfg.HubAPIKey))
 	h.Register(api)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("agent-deployer listening on %s (auth: %v)", addr, cfg.APIKey != "")
+	log.Printf("agent-deployer listening on %s (auth: %v, hub-scope: %v)", addr, cfg.APIKey != "" || cfg.HubAPIKey != "", cfg.HubAPIKey != "")
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
