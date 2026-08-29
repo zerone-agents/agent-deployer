@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -303,5 +304,69 @@ func TestInstaller_DownloadParseError_DoesNotLeakURL(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "ex ample.com") {
 		t.Fatalf("error leaks URL details: %v", err)
+	}
+}
+
+func TestInstaller_Install_RedirectTo2xxRejected(t *testing.T) {
+	body := []byte("export default { name: 'Redirected' }")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(http.StatusTemporaryRedirect) // 307 with Location: real redirect
+		case "/final":
+			_, _ = w.Write(body)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	sum := sha256.Sum256(body)
+	src := model.ToolSource{
+		Name:     "Redirected",
+		URL:      srv.URL + "/redirect",
+		Hash:     hex.EncodeToString(sum[:]),
+		FileName: "r.mjs",
+	}
+	inst := NewInstaller(nil, DefaultLimits()) // nil → default client, still must not follow
+	dir := t.TempDir()
+	_, err := inst.Install(context.Background(), src, dir)
+	if err == nil {
+		t.Fatal("redirect chain must be rejected even when the final response is 2xx")
+	}
+	if !strings.Contains(err.Error(), "http status 307") {
+		t.Fatalf("error should report the rejected 3xx status: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "Redirected.mjs")); statErr == nil {
+		t.Fatal("no artifact may be left behind by a rejected redirect")
+	}
+}
+
+func TestInstaller_DownloadLocalStorageError_NotUpstreamFailure(t *testing.T) {
+	// os.Create fails with EISDIR when dest is an existing directory —
+	// deterministic local-storage failure, no network needed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("content"))
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "out")
+	if err := os.Mkdir(dest, 0755); err != nil {
+		t.Fatal(err)
+	}
+	inst := NewInstaller(nil, DefaultLimits())
+	_, err := inst.download(context.Background(), srv.URL, dest)
+	if err == nil {
+		t.Fatal("expected local storage failure")
+	}
+	if !errors.Is(err, ErrLocalStorage) {
+		t.Fatalf("error must carry ErrLocalStorage: %v", err)
+	}
+	if errors.Is(err, ErrDownloadFailed) {
+		t.Fatalf("local storage failure must not be classified as upstream: %v", err)
+	}
+	if !strings.Contains(err.Error(), "create dest file") {
+		t.Fatalf("error should name the failing phase: %v", err)
 	}
 }

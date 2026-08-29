@@ -59,6 +59,12 @@ var (
 	// ErrEmptyFile is returned when the download is shorter than MinBytes
 	// (i.e. empty). Clients should map to HTTP 422.
 	ErrEmptyFile = errors.New("tool file is empty")
+
+	// ErrLocalStorage wraps local filesystem failures while persisting a
+	// downloaded tool (create/write/close of the destination file). This is
+	// a deployer-side fault, not an upstream one: clients should map it to
+	// HTTP 500, not 502.
+	ErrLocalStorage = errors.New("tool local storage failure")
 )
 
 // Installer downloads and verifies single custom Tool files. One Installer
@@ -69,16 +75,31 @@ type Installer struct {
 }
 
 // NewInstaller constructs an Installer. client may be nil (defaults to
-// http.DefaultClient). A zero DownloadTimeout is replaced with
-// DefaultLimits() to avoid network hangs (same guard as the skills installer).
+// http.DefaultClient); regardless, the caller's client is never used or
+// mutated directly — a shallow copy with redirect following disabled is
+// made instead, because issue #10 rejects non-2xx responses and the first
+// response of a redirect chain is non-2xx. A zero DownloadTimeout is
+// replaced with DefaultLimits() to avoid network hangs (same guard as the
+// skills installer).
 func NewInstaller(client *http.Client, limits Limits) *Installer {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	// Redirects must be rejected, not followed (issue #10: "reject non-2xx
+	// responses" — the first response of a redirect chain is non-2xx).
+	// http.Client has no Clone method, so shallow-copy the struct (Transport
+	// / Jar / Timeout carry over; the shared Transport is safe — it is never
+	// mutated) and set CheckRedirect on the copy, never on the caller's
+	// client. ErrUseLastResponse makes Do return the 3xx response itself,
+	// which the status check then rejects.
+	noRedirect := *client
+	noRedirect.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	if limits.DownloadTimeout == 0 {
 		limits = DefaultLimits()
 	}
-	return &Installer{client: client, limits: limits}
+	return &Installer{client: &noRedirect, limits: limits}
 }
 
 // Install makes source.Name available at toolsDir/<Name><Ext> and returns
@@ -129,6 +150,11 @@ func (i *Installer) Install(ctx context.Context, source model.ToolSource, toolsD
 	tmpPath := filepath.Join(workDir, "tool.bin")
 	actual, err := i.download(ctx, source.URL, tmpPath)
 	if err != nil {
+		if errors.Is(err, ErrLocalStorage) {
+			// Local disk fault — a deployer-side failure (handler: 500),
+			// never an upstream one. Phase named accurately.
+			return "", fmt.Errorf("persist tool %q: %w", source.Name, err)
+		}
 		if !errors.Is(err, ErrDownloadFailed) && !errors.Is(err, ErrSizeExceeded) && !errors.Is(err, ErrEmptyFile) {
 			err = fmt.Errorf("%w: %v", ErrDownloadFailed, err)
 		}
@@ -184,11 +210,11 @@ func (i *Installer) download(ctx context.Context, rawURL, dest string) (_ string
 
 	f, err := os.Create(dest)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: create dest file: %v", ErrLocalStorage, err)
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil && err == nil {
-			err = cerr
+			err = fmt.Errorf("%w: close dest file: %v", ErrLocalStorage, cerr)
 		}
 	}()
 
@@ -206,7 +232,7 @@ func (i *Installer) download(ctx context.Context, rawURL, dest string) (_ string
 				return "", werr
 			}
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				return "", werr
+				return "", fmt.Errorf("%w: write dest file: %v", ErrLocalStorage, werr)
 			}
 		}
 		if readErr == io.EOF {

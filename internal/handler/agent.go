@@ -50,6 +50,7 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 //   - 400 on validation error
 //   - 422 when a declared skill/tool hash is wrong or the artifact violates limits
 //   - 502 on skill/tool download upstream failure
+//   - 500 on tool local-storage failure (deployer-side disk fault)
 //   - 500 on internal failure
 func (h *AgentHandler) Create(c *gin.Context) {
 	var req model.CreateAgentRequest
@@ -73,6 +74,10 @@ func (h *AgentHandler) Create(c *gin.Context) {
 			// Client metadata error: the hash they declared doesn't match the
 			// actual download, or the artifact violates size constraints.
 			status = http.StatusUnprocessableEntity
+		case errors.Is(err, tools.ErrLocalStorage):
+			// Deployer-side local storage failure while persisting a tool
+			// file: internal error, not an upstream artifact failure.
+			status = http.StatusInternalServerError
 		case errors.Is(err, skills.ErrDownloadFailed),
 			errors.Is(err, tools.ErrDownloadFailed):
 			// Upstream failure: HTTP non-2xx from the artifact URL, network
