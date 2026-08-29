@@ -8,9 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/zerone-agent/agent-deployer/internal/config"
@@ -53,22 +56,108 @@ type AgentService struct {
 	dc        DockerClient
 	storage   *storage.AgentStorage
 	installer *skills.Installer
+
+	// dialTCP dials the upstream locator for reachability probing. Injectable
+	// for tests; production default is a 1s TCP dial.
+	dialTCP func(ctx context.Context, addr string) error
 }
 
 // NewAgentService constructs an AgentService wired to the given config and
 // Docker client.
 func NewAgentService(cfg *config.Config, dc DockerClient) *AgentService {
-	return &AgentService{
+	svc := &AgentService{
 		cfg:       cfg,
 		dc:        dc,
 		storage:   storage.NewAgentStorage(cfg.DataDir),
 		installer: skills.NewInstaller(http.DefaultClient, skills.DefaultLimits()),
+		dialTCP: func(ctx context.Context, addr string) error {
+			d := net.Dialer{Timeout: time.Second}
+			conn, err := d.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return err
+			}
+			return conn.Close()
+		},
 	}
+	return svc
 }
 
 // Config returns the configuration the service was constructed with.
 // Exposed primarily for integration tests that need to inspect on-disk paths.
 func (s *AgentService) Config() *config.Config { return s.cfg }
+
+// runtimeBindHost returns the host IP that runtime container ports are
+// published on. Empty string means "do not publish any host port"
+// (docker-network topology).
+func (s *AgentService) runtimeBindHost() string {
+	switch s.cfg.RuntimeExpose {
+	case config.ExposeLoopback:
+		return "127.0.0.1"
+	case config.ExposePrivate:
+		return s.cfg.RuntimeBindIP
+	case config.ExposeDockerNetwork:
+		return ""
+	default: // public and zero value
+		return "0.0.0.0"
+	}
+}
+
+// upstreamFor derives the trusted internal locator for a runtime container
+// from the configured topology and live container state (issue #11). It never
+// reads client input. It returns nil — never a stale or guessed address —
+// when no valid locator can be derived (fail closed):
+//
+//   - public topology: locators are not emitted at all
+//   - any other topology: the container must be running — Docker retains
+//     port bindings for stopped containers, but the process is down, so a
+//     non-running container yields no locator in every topology (fail
+//     closed)
+//   - loopback/private: the container must additionally have a published
+//     host port
+//   - docker-network: the container must additionally be attached to the
+//     configured shared network (containers from before a topology switch
+//     fail closed and must be force-redeployed)
+//
+// The derived locator is re-validated as defense in depth.
+func (s *AgentService) upstreamFor(c *docker.RuntimeContainer) *model.Upstream {
+	var u model.Upstream
+	switch s.cfg.RuntimeExpose {
+	case config.ExposeLoopback, config.ExposePrivate:
+		if c.Status != "running" {
+			return nil
+		}
+		if c.HostPort == 0 {
+			return nil
+		}
+		// The locator host is always the exact address the port is bound to:
+		// loopback mode binds 127.0.0.1, private mode binds RUNTIME_BIND_IP.
+		// No override — a locator advertising anything but the actual bind
+		// address could be syntactically valid yet unreachable (issue #11,
+		// PR #12 review round 2).
+		u = model.Upstream{Scheme: "http", Port: c.HostPort}
+		if s.cfg.RuntimeExpose == config.ExposeLoopback {
+			u.Host = "127.0.0.1"
+		} else {
+			u.Host = s.cfg.RuntimeBindIP
+		}
+	case config.ExposeDockerNetwork:
+		if c.Status != "running" {
+			return nil
+		}
+		if !slices.Contains(c.Networks, s.cfg.RuntimeNetwork) {
+			return nil
+		}
+		u = model.Upstream{Scheme: "http", Host: c.Name, Port: s.cfg.RuntimeContainerPort}
+	default: // public: no locator, ever
+		return nil
+	}
+	if err := u.Validate(); err != nil {
+		// Defense in depth: a config/container combination that would produce
+		// an invalid locator yields no locator at all.
+		return nil
+	}
+	return &u
+}
 
 // Create creates a new agent container. If an existing container is found for
 // the same agent name, the request is treated as idempotent (returning the
@@ -155,6 +244,8 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		RuntimeToken:         runtimeToken,
 		MemoryBytes:          s.cfg.ContainerMemoryBytes,
 		NanoCPUs:             s.cfg.ContainerNanoCPUs,
+		BindHost:             s.runtimeBindHost(),
+		NetworkName:          s.cfg.RuntimeNetwork,
 	}
 
 	containerID, hostPort, err := s.dc.CreateAgentContainer(ctx, opts)
@@ -178,6 +269,17 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		}
 	}
 
+	// Derive the locator from the container we just created. The synthetic
+	// RuntimeContainer mirrors what a subsequent Get would find.
+	fresh := &docker.RuntimeContainer{
+		Name:     containerName,
+		Status:   "running",
+		HostPort: hostPort,
+	}
+	if s.cfg.RuntimeNetwork != "" {
+		fresh.Networks = []string{s.cfg.RuntimeNetwork}
+	}
+
 	return &model.AgentResponse{
 		AgentName:     agentName,
 		InstanceID:    instanceID,
@@ -190,6 +292,7 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		SessionDir:    sessionDir,
 		SkillsDir:     skillsDir,
 		RuntimeToken:  runtimeToken,
+		Upstream:      s.upstreamFor(fresh),
 	}, true, nil
 }
 
@@ -280,6 +383,7 @@ func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.Agent
 			Health:        "none",
 			HostPort:      c.HostPort,
 			Image:         c.Image,
+			Upstream:      s.upstreamFor(c),
 		}, nil
 	}
 
@@ -288,7 +392,7 @@ func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.Agent
 		health = "none"
 	}
 
-	return &model.AgentStatusResponse{
+	resp := &model.AgentStatusResponse{
 		AgentName:     c.AgentName,
 		ContainerName: detailed.Name,
 		ContainerID:   detailed.ID,
@@ -296,7 +400,13 @@ func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.Agent
 		Health:        health,
 		HostPort:      detailed.HostPort,
 		Image:         detailed.Image,
-	}, nil
+		Upstream:      s.upstreamFor(detailed),
+	}
+	if s.cfg.UpstreamProbe && resp.Upstream != nil {
+		reachable := s.dialTCP(ctx, net.JoinHostPort(resp.Upstream.Host, strconv.Itoa(resp.Upstream.Port))) == nil
+		resp.UpstreamReachable = &reachable
+	}
+	return resp, nil
 }
 
 // GetLogs returns the last `tail` lines of the agent's container output.
@@ -389,6 +499,7 @@ func (s *AgentService) toResponse(c *docker.RuntimeContainer) *model.AgentRespon
 		YamlPath:      filepath.Join(agentDir, "agents.yaml"),
 		SessionDir:    filepath.Join(s.cfg.DataDir, c.AgentName, "sessions"),
 		SkillsDir:     filepath.Join(s.cfg.DataDir, c.AgentName, "skills"),
+		Upstream:      s.upstreamFor(c),
 	}
 }
 

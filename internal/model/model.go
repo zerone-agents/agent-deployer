@@ -281,6 +281,47 @@ type ContainerInfo struct {
 	SessionDir    string      `json:"sessionDir"`
 }
 
+// upstreamHostPattern matches a bare hostname or IP literal: alphanumeric
+// segments joined by dots/hyphens, starting and ending alphanumeric. Docker
+// container names (cloud-agent-coder-ab12cd34), DNS names and IP literals
+// pass; anything carrying scheme/userinfo/port/path does not.
+var upstreamHostPattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
+
+// ValidateUpstreamHost reports whether host is acceptable as an upstream
+// locator host (no scheme, userinfo, port or path embedded).
+func ValidateUpstreamHost(host string) bool {
+	return upstreamHostPattern.MatchString(host)
+}
+
+// Upstream is a server-generated locator for an agent runtime's HTTP API over
+// a trusted internal network path (issue #11). It is derived exclusively from
+// deployer deployment state and server-side topology configuration — never
+// from client input — and is omitted from responses whenever no valid locator
+// can be derived (fail closed).
+type Upstream struct {
+	Scheme string `json:"scheme"`
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+}
+
+// Validate checks that the locator is well-formed and restricted to the
+// supported trust envelope: http only, bare host, valid TCP port.
+func (u *Upstream) Validate() error {
+	if u == nil {
+		return fmt.Errorf("upstream is nil")
+	}
+	if u.Scheme != "http" {
+		return fmt.Errorf("upstream scheme must be http, got %q", u.Scheme)
+	}
+	if !ValidateUpstreamHost(u.Host) {
+		return fmt.Errorf("upstream host must be a bare hostname or IP literal, got %q", u.Host)
+	}
+	if u.Port < 1 || u.Port > 65535 {
+		return fmt.Errorf("upstream port must be between 1 and 65535, got %d", u.Port)
+	}
+	return nil
+}
+
 // AgentResponse represents the response data for an agent.
 type AgentResponse struct {
 	AgentName     string      `json:"agentName"`
@@ -298,6 +339,11 @@ type AgentResponse struct {
 	// Populated ONLY by Create: the deployer does not persist it, so Get / List
 	// leave it empty. Clients must store it at creation time.
 	RuntimeToken string `json:"runtimeToken,omitempty"`
+	// Upstream is the trusted internal locator for the runtime's HTTP API,
+	// derived from server-side topology configuration and live container
+	// state. Nil (and omitted from JSON) in public topology and whenever no
+	// valid locator can be derived — never populated from client input.
+	Upstream *Upstream `json:"upstream,omitempty"`
 }
 
 // ErrorResponse represents a standard error response.
@@ -322,6 +368,11 @@ type AgentStatusResponse struct {
 	Health        string `json:"health"` // Docker health: starting, healthy, unhealthy, none
 	HostPort      int    `json:"hostPort"`
 	Image         string `json:"image"`
+	// Upstream is the trusted internal locator (see AgentResponse.Upstream).
+	Upstream *Upstream `json:"upstream,omitempty"`
+	// UpstreamReachable reports a TCP-dial probe against Upstream. Only set
+	// when AGENT_DEPLOYER_UPSTREAM_PROBE is enabled (issue #11 design req 5).
+	UpstreamReachable *bool `json:"upstreamReachable,omitempty"`
 }
 
 // ValidateCreateRequest validates a CreateAgentRequest at the package level.

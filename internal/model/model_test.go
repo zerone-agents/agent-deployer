@@ -1656,3 +1656,47 @@ func TestCreateAgentRequest_Validate_ValidHub(t *testing.T) {
 	err := req.Validate()
 	require.NoError(t, err)
 }
+
+// --- issue #11: trusted upstream locator ---
+
+func TestUpstream_Validate(t *testing.T) {
+	// Container DNS name (docker-network topology)
+	assert.NoError(t, (&Upstream{Scheme: "http", Host: "cloud-agent-coder-ab12cd34", Port: 3000}).Validate())
+	// Loopback / private IPs
+	assert.NoError(t, (&Upstream{Scheme: "http", Host: "127.0.0.1", Port: 32768}).Validate())
+	assert.NoError(t, (&Upstream{Scheme: "http", Host: "10.2.0.5", Port: 32769}).Validate())
+	// Override host style (host.docker.internal)
+	assert.NoError(t, (&Upstream{Scheme: "http", Host: "host.docker.internal", Port: 32770}).Validate())
+
+	assert.Error(t, (&Upstream{Scheme: "https", Host: "x", Port: 1}).Validate(), "only http is supported")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "", Port: 1}).Validate(), "empty host")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "evil.com:8080", Port: 1}).Validate(), "port inside host")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "user@evil.com", Port: 1}).Validate(), "userinfo")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "evil.com/x", Port: 1}).Validate(), "path")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "-leading", Port: 1}).Validate(), "leading hyphen")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "ok", Port: 0}).Validate(), "port 0")
+	assert.Error(t, (&Upstream{Scheme: "http", Host: "ok", Port: 65536}).Validate(), "port > 65535")
+}
+
+func TestValidateUpstreamHost(t *testing.T) {
+	assert.True(t, ValidateUpstreamHost("cloud-agent-coder-ab12cd34"))
+	assert.True(t, ValidateUpstreamHost("192.168.1.10"))
+	assert.False(t, ValidateUpstreamHost(""))
+	assert.False(t, ValidateUpstreamHost("a b"))
+	assert.False(t, ValidateUpstreamHost("a:80"))
+}
+
+func TestAgentResponse_UpstreamOmittedWhenNil(t *testing.T) {
+	data, err := json.Marshal(&AgentResponse{AgentName: "coder"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "upstream", "public topology must not leak the locator field")
+}
+
+func TestAgentResponse_UpstreamEmittedWhenSet(t *testing.T) {
+	data, err := json.Marshal(&AgentResponse{
+		AgentName: "coder",
+		Upstream:  &Upstream{Scheme: "http", Host: "cloud-agent-coder-ab12cd34", Port: 3000},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"upstream":{"scheme":"http","host":"cloud-agent-coder-ab12cd34","port":3000}`)
+}

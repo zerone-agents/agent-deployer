@@ -6,11 +6,13 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/zerone-agent/agent-deployer/internal/config"
 	"github.com/zerone-agent/agent-deployer/internal/model"
 	"github.com/zerone-agent/agent-deployer/internal/service"
 	"github.com/zerone-agent/agent-deployer/internal/skills"
@@ -40,6 +42,24 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 	g.DELETE("/:name", h.Delete)
 }
 
+// stripUpstream removes the trusted locator from an agent response unless
+// the request was authenticated with the hub-scoped key. The locator never
+// enters ordinary-client DTOs (issue #11).
+func stripUpstream(c *gin.Context, resp *model.AgentResponse) {
+	if !c.GetBool(ContextKeyHubScope) {
+		resp.Upstream = nil
+	}
+}
+
+// stripStatusUpstream is stripUpstream for the live-status payload; the
+// optional probe result goes with the locator.
+func stripStatusUpstream(c *gin.Context, resp *model.AgentStatusResponse) {
+	if !c.GetBool(ContextKeyHubScope) {
+		resp.Upstream = nil
+		resp.UpstreamReachable = nil
+	}
+}
+
 // Create handles POST /agents: validate the body, create the container, and
 // return the resulting agent description.
 //
@@ -51,6 +71,26 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 //   - 502 on skill download upstream failure
 //   - 500 on internal failure
 func (h *AgentHandler) Create(c *gin.Context) {
+	// docker-network mode publishes no host ports, so the only caller that
+	// may create portless runtimes is a locator-aware hub: hub-scoped
+	// authentication AND the versioned capability header observed on the
+	// request (issue #11 acceptance #9). The header value is a public
+	// constant, so the scope check is what binds it to the hub — a
+	// general-key caller copying the header is refused before any container
+	// is created.
+	if h.svc.Config().RuntimeExpose == config.ExposeDockerNetwork {
+		if !c.GetBool(ContextKeyHubScope) {
+			c.JSON(http.StatusForbidden, model.ErrorResponse{Success: false, Error: "creating portless runtimes in docker-network mode requires hub-scoped authentication"})
+			return
+		}
+		if c.GetHeader("X-Hub-Locator-Capability") != config.HubLocatorCapability {
+			c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: fmt.Sprintf(
+				"X-Hub-Locator-Capability header must be %q in docker-network mode: upgrade agent-hub to a locator-aware version before deploying portless runtimes",
+				config.HubLocatorCapability)})
+			return
+		}
+	}
+
 	var req model.CreateAgentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: err.Error()})
@@ -77,6 +117,7 @@ func (h *AgentHandler) Create(c *gin.Context) {
 		return
 	}
 
+	stripUpstream(c, resp)
 	if created {
 		c.JSON(http.StatusCreated, model.SuccessResponse{Success: true, Data: resp})
 	} else {
@@ -100,6 +141,7 @@ func (h *AgentHandler) Get(c *gin.Context) {
 		c.JSON(status, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
 	}
+	stripUpstream(c, resp)
 	c.JSON(http.StatusOK, model.SuccessResponse{Success: true, Data: resp})
 }
 
@@ -116,6 +158,7 @@ func (h *AgentHandler) Status(c *gin.Context) {
 		c.JSON(status, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
 	}
+	stripStatusUpstream(c, resp)
 	c.JSON(http.StatusOK, model.SuccessResponse{Success: true, Data: resp})
 }
 
@@ -152,6 +195,9 @@ func (h *AgentHandler) List(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
+	}
+	for i := range resp {
+		stripUpstream(c, &resp[i])
 	}
 	c.JSON(http.StatusOK, model.SuccessResponse{Success: true, Data: resp})
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -25,18 +26,19 @@ import (
 
 // fakeDockerClient is a test double for the DockerClient interface.
 type fakeDockerClient struct {
-	existing      *docker.RuntimeContainer
-	created       *docker.CreateOpts
-	stoppedID     string
-	removedID     string
-	removed       bool
-	listResult    []docker.RuntimeContainer
-	createErr     error
-	findErr       error
-	copySkillsErr error
-	copiedCID     string
-	copiedDir     string
-	copiedNames   []string
+	existing       *docker.RuntimeContainer
+	created        *docker.CreateOpts
+	createHostPort *int // when set, CreateAgentContainer returns this port instead of 32768
+	stoppedID      string
+	removedID      string
+	removed        bool
+	listResult     []docker.RuntimeContainer
+	createErr      error
+	findErr        error
+	copySkillsErr  error
+	copiedCID      string
+	copiedDir      string
+	copiedNames    []string
 }
 
 func (f *fakeDockerClient) FindAgentContainer(ctx context.Context, agentName string) (*docker.RuntimeContainer, error) {
@@ -58,7 +60,11 @@ func (f *fakeDockerClient) CreateAgentContainer(ctx context.Context, opts docker
 	if f.createErr != nil {
 		return "", 0, f.createErr
 	}
-	return "container-id-123", 32768, nil
+	port := 32768
+	if f.createHostPort != nil {
+		port = *f.createHostPort
+	}
+	return "container-id-123", port, nil
 }
 
 func (f *fakeDockerClient) StopContainer(ctx context.Context, id string) error {
@@ -125,6 +131,22 @@ func newTestService(t *testing.T, fake *fakeDockerClient) (*AgentService, string
 		RuntimeContainerPort: 3000,
 	}
 	return NewAgentService(cfg, fake), dataDir
+}
+
+// newTestServiceWithConfig is newTestService for tests that need a custom
+// config (e.g. non-public expose topologies).
+func newTestServiceWithConfig(t *testing.T, fake *fakeDockerClient, cfg *config.Config) *AgentService {
+	t.Helper()
+	if cfg.DataDir == "" {
+		cfg.DataDir = t.TempDir()
+	}
+	if cfg.RuntimeContainerPort == 0 {
+		cfg.RuntimeContainerPort = 3000
+	}
+	if cfg.RuntimeImage == "" {
+		cfg.RuntimeImage = "open-agent-runtime:latest"
+	}
+	return NewAgentService(cfg, fake)
 }
 
 // TestAgentService_Create_WritesProviderCredentialsToYAML guards the
@@ -1042,4 +1064,303 @@ func TestAgentService_Create_HubOrgForceRebuild(t *testing.T) {
 	if got := readYAML(t); strings.Contains(got, "org:") {
 		t.Errorf("agents.yaml should have no org after force rebuild without org; content:\n%s", got)
 	}
+}
+
+// --- issue #11: trusted upstream locator ---
+
+func TestCreate_PublicTopology_NoUpstream(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{})
+
+	resp, _, err := svc.Create(context.Background(), validRequest())
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream, "public topology must not emit a locator")
+	assert.Equal(t, "0.0.0.0", fake.created.BindHost)
+	assert.Empty(t, fake.created.NetworkName)
+	assert.Equal(t, 32768, resp.HostPort)
+}
+
+func TestCreate_LoopbackTopology(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{RuntimeExpose: config.ExposeLoopback})
+
+	resp, _, err := svc.Create(context.Background(), validRequest())
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, "http", resp.Upstream.Scheme)
+	assert.Equal(t, "127.0.0.1", resp.Upstream.Host)
+	assert.Equal(t, 32768, resp.Upstream.Port)
+	assert.Equal(t, "127.0.0.1", fake.created.BindHost)
+}
+
+func TestCreate_PrivateTopology(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose: config.ExposePrivate,
+		RuntimeBindIP: "10.2.0.5",
+	})
+
+	resp, _, err := svc.Create(context.Background(), validRequest())
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, "10.2.0.5", resp.Upstream.Host)
+	assert.Equal(t, 32768, resp.Upstream.Port)
+	assert.Equal(t, "10.2.0.5", fake.created.BindHost)
+}
+
+func TestCreate_DockerNetworkTopology(t *testing.T) {
+	fake := &fakeDockerClient{}
+	zero := 0
+	fake.createHostPort = &zero
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+	})
+
+	resp, _, err := svc.Create(context.Background(), validRequest())
+	require.NoError(t, err)
+	// HostPort == 0 with a running container is a legal state (acceptance #4).
+	assert.Equal(t, 0, resp.HostPort)
+	assert.Equal(t, model.StatusRunning, resp.Status)
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, "http", resp.Upstream.Scheme)
+	assert.Equal(t, resp.ContainerName, resp.Upstream.Host, "locator host must be the container DNS name")
+	assert.Equal(t, 3000, resp.Upstream.Port, "locator port must be the runtime container port")
+	assert.Empty(t, fake.created.BindHost, "no host port may be published")
+	assert.Equal(t, "hubnet", fake.created.NetworkName)
+}
+
+func TestGet_DockerNetworkTopology(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID:        "cid-1",
+			Name:      "cloud-agent-coder-aaaaaaaa",
+			AgentName: "coder",
+			Status:    "running",
+			Networks:  []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+	})
+
+	resp, err := svc.Get(context.Background(), "coder")
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, "cloud-agent-coder-aaaaaaaa", resp.Upstream.Host)
+	assert.Equal(t, 3000, resp.Upstream.Port)
+}
+
+func TestGet_DockerNetworkTopology_FailClosed(t *testing.T) {
+	cfg := &config.Config{RuntimeExpose: config.ExposeDockerNetwork, RuntimeNetwork: "hubnet"}
+
+	// Stopped container: DNS name no longer resolves.
+	fake := &fakeDockerClient{existing: &docker.RuntimeContainer{
+		Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder", Status: "exited", Networks: []string{"hubnet"},
+	}}
+	resp, err := newTestServiceWithConfig(t, fake, cfg).Get(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream, "stopped container must not get a locator")
+
+	// Container attached to the wrong network (created before a topology switch).
+	fake2 := &fakeDockerClient{existing: &docker.RuntimeContainer{
+		Name: "cloud-agent-coder-bbbbbbbb", AgentName: "coder", Status: "running", Networks: []string{"bridge"},
+	}}
+	resp2, err := newTestServiceWithConfig(t, fake2, cfg).Get(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp2.Upstream, "container not on the configured network must not get a locator")
+}
+
+func TestGet_LoopbackTopology_FailClosedWithoutHostPort(t *testing.T) {
+	fake := &fakeDockerClient{existing: &docker.RuntimeContainer{
+		Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder", Status: "running",
+	}}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{RuntimeExpose: config.ExposeLoopback})
+
+	resp, err := svc.Get(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream, "no published port = no locator")
+}
+
+func TestGet_LoopbackTopology_FailClosedWhenStopped(t *testing.T) {
+	fake := &fakeDockerClient{existing: &docker.RuntimeContainer{
+		Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder", Status: "exited", HostPort: 32768,
+	}}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{RuntimeExpose: config.ExposeLoopback})
+
+	resp, err := svc.Get(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream,
+		"stopped containers must not get a locator in any topology — bindings linger but the process is down (issue #11: stop 后 locator 不得继续指向旧容器)")
+}
+
+func TestGetStatus_DockerNetworkTopology(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID:        "cid-1",
+			Name:      "cloud-agent-coder-aaaaaaaa",
+			AgentName: "coder",
+			Status:    "running",
+			Networks:  []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+	})
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, "cloud-agent-coder-aaaaaaaa", resp.Upstream.Host)
+	assert.Nil(t, resp.UpstreamReachable, "probe disabled by default")
+}
+
+func TestCreate_ForceRedeploy_UpstreamPointsAtNewContainer(t *testing.T) {
+	cfg := &config.Config{RuntimeExpose: config.ExposeDockerNetwork, RuntimeNetwork: "hubnet"}
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID:        "cid-old",
+			Name:      "cloud-agent-coder-oldold",
+			AgentName: "coder",
+			Status:    "running",
+			Networks:  []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, cfg)
+
+	req := validRequest()
+	req.Force = true
+	resp, _, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, fake.removed, "old container must be removed")
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, resp.ContainerName, resp.Upstream.Host)
+	assert.NotEqual(t, "cloud-agent-coder-oldold", resp.Upstream.Host,
+		"locator must not survive a redeploy pointing at the old container")
+}
+
+// TestCreate_DistinctAgentNames_DistinctUpstreams pins the deployer-side
+// tenant-isolation contract: the deployment key is the sanitized agent name,
+// and the hub qualifies same-named agents per tenant into distinct composite
+// names (e.g. tenant1-coder / tenant2-coder). Deployer treats those as
+// opaque, distinct deployments, so their locators can never alias. The
+// same-name replacement case (redeploy) is covered by
+// TestCreate_ForceRedeploy_UpstreamPointsAtNewContainer and the integration
+// force-redeploy test. Deployer itself does not verify tenant identity —
+// authorization stays on the hub side (issue #11).
+func TestCreate_DistinctAgentNames_DistinctUpstreams(t *testing.T) {
+	cfg := &config.Config{RuntimeExpose: config.ExposeDockerNetwork, RuntimeNetwork: "hubnet"}
+
+	reqA := validRequest()
+	reqA.Agent.Name = "tenant1-coder"
+	svcA := newTestServiceWithConfig(t, &fakeDockerClient{}, cfg)
+	respA, _, err := svcA.Create(context.Background(), reqA)
+	require.NoError(t, err)
+
+	reqB := validRequest()
+	reqB.Agent.Name = "tenant2-coder"
+	svcB := newTestServiceWithConfig(t, &fakeDockerClient{}, cfg)
+	respB, _, err := svcB.Create(context.Background(), reqB)
+	require.NoError(t, err)
+
+	require.NotNil(t, respA.Upstream)
+	require.NotNil(t, respB.Upstream)
+	assert.NotEqual(t, respA.Upstream.Host, respB.Upstream.Host,
+		"distinct deployment names (hub tenant-qualified) must never share a locator")
+}
+
+func TestCreate_ClientCannotInjectUpstream(t *testing.T) {
+	// The request JSON carries a forged upstream field. Go's json decoding
+	// drops unknown fields, so the server-derived locator (or none) must win.
+	body := `{
+		"agent": {"name": "coder", "description": "d", "model": "m", "systemPrompt": "s"},
+		"provider": {"protocol": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "lockedApiKey": "sk"},
+		"runtime_token": "tok",
+		"upstream": {"scheme": "http", "host": "evil.example.com", "port": 1}
+	}`
+	var req model.CreateAgentRequest
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+
+	fake := &fakeDockerClient{}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{RuntimeExpose: config.ExposeLoopback})
+	resp, _, err := svc.Create(context.Background(), &req)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	assert.Equal(t, "127.0.0.1", resp.Upstream.Host,
+		"a client-injected upstream field must never reach the response")
+}
+
+func TestGetStatus_ProbeReportsReachable(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID: "cid-1", Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder",
+			Status: "running", Networks: []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		UpstreamProbe:  true,
+	})
+	dialed := ""
+	svc.dialTCP = func(_ context.Context, addr string) error {
+		dialed = addr
+		return nil
+	}
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	require.NotNil(t, resp.UpstreamReachable)
+	assert.True(t, *resp.UpstreamReachable)
+	assert.Equal(t, "cloud-agent-coder-aaaaaaaa:3000", dialed)
+}
+
+func TestGetStatus_ProbeReportsUnreachable(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID: "cid-1", Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder",
+			Status: "running", Networks: []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		UpstreamProbe:  true,
+	})
+	svc.dialTCP = func(_ context.Context, _ string) error {
+		return errors.New("connection refused")
+	}
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err, "unreachability is a status, not an error")
+	require.NotNil(t, resp.UpstreamReachable)
+	assert.False(t, *resp.UpstreamReachable)
+}
+
+func TestGetStatus_ProbeSkippedWhenUpstreamNil(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID: "cid-1", Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder",
+			Status: "exited", Networks: []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		UpstreamProbe:  true,
+	})
+	called := false
+	svc.dialTCP = func(_ context.Context, _ string) error {
+		called = true
+		return nil
+	}
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream)
+	assert.Nil(t, resp.UpstreamReachable)
+	assert.False(t, called, "nothing to probe when no locator was derived")
 }
