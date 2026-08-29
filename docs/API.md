@@ -584,6 +584,9 @@ Notes:
   legal running state in `docker-network` mode.
 - The locator is re-derived on every request from live container state. After
   `force` redeploy the old locator stops being returned automatically.
+- Stopped/exited containers emit **no** locator in every mode (fail closed):
+  Docker keeps their port bindings, but the process is down. Reachability
+  while running is the probe's job (`upstreamReachable`).
 - Containers created before switching to `docker-network` mode are not on the
   shared network: they get **no** locator (fail closed) and must be recreated
   with `force: true`.

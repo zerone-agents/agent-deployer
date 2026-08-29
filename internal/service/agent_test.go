@@ -1196,6 +1196,18 @@ func TestGet_LoopbackTopology_FailClosedWithoutHostPort(t *testing.T) {
 	assert.Nil(t, resp.Upstream, "no published port = no locator")
 }
 
+func TestGet_LoopbackTopology_FailClosedWhenStopped(t *testing.T) {
+	fake := &fakeDockerClient{existing: &docker.RuntimeContainer{
+		Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder", Status: "exited", HostPort: 32768,
+	}}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{RuntimeExpose: config.ExposeLoopback})
+
+	resp, err := svc.Get(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream,
+		"stopped containers must not get a locator in any topology — bindings linger but the process is down (issue #11: stop 后 locator 不得继续指向旧容器)")
+}
+
 func TestGetStatus_DockerNetworkTopology(t *testing.T) {
 	fake := &fakeDockerClient{
 		existing: &docker.RuntimeContainer{

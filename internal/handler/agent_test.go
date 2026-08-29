@@ -833,3 +833,20 @@ func TestStatus_DockerNetworkMode_IncludesUpstream(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `"upstream":{"scheme":"http","host":"cloud-agent-coder-aaaaaaaa","port":3000}`)
 }
+
+func TestStatus_PublicMode_ResponseOmitsUpstreamKey(t *testing.T) {
+	r, _, fake := setupTestRouter(t) // legacy config: public topology
+	fake.containers["coder"] = &docker.RuntimeContainer{
+		ID:        "cid-1",
+		Name:      "cloud-agent-coder-aaaaaaaa",
+		AgentName: "coder",
+		Status:    "running",
+		HostPort:  32768,
+	}
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/agents/coder/status", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "upstream",
+		"public topology status responses must not carry the locator field")
+}

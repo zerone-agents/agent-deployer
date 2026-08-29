@@ -108,8 +108,13 @@ func (s *AgentService) runtimeBindHost() string {
 // when no valid locator can be derived (fail closed):
 //
 //   - public topology: locators are not emitted at all
-//   - loopback/private: the container must have a published host port
-//   - docker-network: the container must be running AND attached to the
+//   - any other topology: the container must be running — Docker retains
+//     port bindings for stopped containers, but the process is down, so a
+//     non-running container yields no locator in every topology (fail
+//     closed)
+//   - loopback/private: the container must additionally have a published
+//     host port
+//   - docker-network: the container must additionally be attached to the
 //     configured shared network (containers from before a topology switch
 //     fail closed and must be force-redeployed)
 //
@@ -118,6 +123,9 @@ func (s *AgentService) upstreamFor(c *docker.RuntimeContainer) *model.Upstream {
 	var u model.Upstream
 	switch s.cfg.RuntimeExpose {
 	case config.ExposeLoopback, config.ExposePrivate:
+		if c.Status != "running" {
+			return nil
+		}
 		if c.HostPort == 0 {
 			return nil
 		}
