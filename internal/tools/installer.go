@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,16 +152,23 @@ func (i *Installer) Install(ctx context.Context, source model.ToolSource, toolsD
 // 2xx-only, MaxBytes, MinBytes, and DownloadTimeout limits. It never reads
 // or logs the response body beyond hashing/writing it. Returns the actual
 // lowercase hex sha256 of the downloaded bytes.
-func (i *Installer) download(ctx context.Context, url, dest string) (_ string, err error) {
+func (i *Installer) download(ctx context.Context, rawURL, dest string) (_ string, err error) {
 	dlCtx, cancel := context.WithTimeout(ctx, i.limits.DownloadTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", err
 	}
 	resp, err := i.client.Do(req)
 	if err != nil {
+		// *url.Error embeds the full request URL (incl. query string, often a
+		// signed token) in its message. Keep only the underlying reason so
+		// surfaced errors never leak URL details (issue #10 constraint).
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return "", err
 	}
 	defer resp.Body.Close()

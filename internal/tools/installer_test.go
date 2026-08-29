@@ -257,6 +257,32 @@ func TestInstaller_Install_InvalidSourceRejectedWithoutDownload(t *testing.T) {
 	}
 }
 
+func TestInstaller_DownloadErrors_DoNotLeakURL(t *testing.T) {
+	// Shut the server down so client.Do fails at the transport level with a
+	// *url.Error that would normally embed the full URL + query string.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	urlWithSecret := srv.URL + "/t.js?token=SECRET"
+	srv.Close()
+
+	src := model.ToolSource{
+		Name:     "Leaky",
+		URL:      urlWithSecret,
+		Hash:     strings.Repeat("a", 64),
+		FileName: "l.js",
+	}
+	inst := NewInstaller(nil, DefaultLimits())
+	_, err := inst.Install(context.Background(), src, t.TempDir())
+	if err == nil {
+		t.Fatal("expected download failure against a closed server")
+	}
+	if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), urlWithSecret) {
+		t.Fatalf("error leaks URL details: %v", err)
+	}
+	if !strings.Contains(err.Error(), "tool download failed") {
+		t.Fatalf("error should still be wrapped in ErrDownloadFailed: %v", err)
+	}
+}
+
 // bytesRepeat is a tiny helper to keep the 5 MiB test allocations explicit.
 func bytesRepeat(n int, b byte) []byte {
 	out := make([]byte, n)
