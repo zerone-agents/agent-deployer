@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -148,4 +150,61 @@ func TestTarSkillDirs_EmptyNames(t *testing.T) {
 	tr := tar.NewReader(&buf)
 	_, err := tr.Next()
 	assert.Equal(t, io.EOF, err, "empty skill names should produce empty tar")
+}
+
+// --- issue #11: bind host / network topology ---
+
+func TestPortBindings(t *testing.T) {
+	port := nat.Port("3000/tcp")
+	assert.Equal(t,
+		nat.PortMap{port: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: ""}}},
+		portBindings("0.0.0.0", port))
+	assert.Equal(t,
+		nat.PortMap{port: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: ""}}},
+		portBindings("127.0.0.1", port))
+	assert.Equal(t,
+		nat.PortMap{port: []nat.PortBinding{{HostIP: "10.2.0.5", HostPort: ""}}},
+		portBindings("10.2.0.5", port))
+	assert.Nil(t, portBindings("", port), "empty bind host means no published port")
+}
+
+func TestNetworkingConfig(t *testing.T) {
+	empty := networkingConfig("")
+	assert.Empty(t, empty.EndpointsConfig, "no network name = default bridge")
+	attached := networkingConfig("hubnet")
+	assert.Contains(t, attached.EndpointsConfig, "hubnet")
+	assert.Len(t, attached.EndpointsConfig, 1)
+}
+
+func TestNetworkNames(t *testing.T) {
+	assert.Nil(t, networkNames(nil))
+	assert.Nil(t, networkNames(map[string]*network.EndpointSettings{}))
+	names := networkNames(map[string]*network.EndpointSettings{
+		"bridge": {},
+		"hubnet": {},
+	})
+	assert.Equal(t, []string{"bridge", "hubnet"}, names, "must be sorted for stable comparisons")
+}
+
+func TestToRuntimeContainer_ExtractsNetworks(t *testing.T) {
+	input := types.Container{
+		ID:     "abc123",
+		Names:  []string{"/cloud-agent-coder-aaaaaaaa"},
+		State:  "running",
+		Labels: map[string]string{},
+		NetworkSettings: &types.SummaryNetworkSettings{
+			Networks: map[string]*network.EndpointSettings{
+				"hubnet": {},
+			},
+		},
+	}
+	rc := toRuntimeContainer(input)
+	assert.Equal(t, []string{"hubnet"}, rc.Networks)
+}
+
+func TestToRuntimeContainer_NilNetworkSettings(t *testing.T) {
+	input := types.Container{ID: "x", Labels: map[string]string{}}
+	rc := toRuntimeContainer(input)
+	assert.Nil(t, rc.Networks)
+	assert.Equal(t, 0, rc.HostPort)
 }
