@@ -58,6 +58,52 @@ func (m McpServerConfig) Validate() error {
 // Allowed: letters, digits, dot, underscore, hyphen. Length 1-64.
 var skillNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// validateArtifactName checks that an artifact source name is present and a
+// single safe path segment. Shared by SkillSource and ToolSource.
+func validateArtifactName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("name cannot be %q", name)
+	}
+	if !skillNamePattern.MatchString(name) {
+		return fmt.Errorf("name must match [A-Za-z0-9._-]{1,64}: %q", name)
+	}
+	return nil
+}
+
+// validateArtifactURL checks that an artifact source URL is an absolute
+// http(s) URL with a host. Shared by SkillSource and ToolSource.
+func validateArtifactURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("url is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("url must be http(s) with a host")
+	}
+	return nil
+}
+
+// validateArtifactHash checks that a declared hash is a 64-hex sha256,
+// optionally prefixed with "sha256:". Shared by SkillSource and ToolSource.
+func validateArtifactHash(hash string) error {
+	if strings.TrimSpace(hash) == "" {
+		return fmt.Errorf("hash is required")
+	}
+	if !isValidSha256Hex(normalizeSha256(hash)) {
+		return fmt.Errorf("hash must be 64 hex chars (with optional sha256: prefix)")
+	}
+	return nil
+}
+
+// normalizeSha256 trims, lowercases, and strips the optional "sha256:" prefix.
+func normalizeSha256(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	return strings.TrimPrefix(h, "sha256:")
+}
+
 // SkillSource describes a single skill zip archive to download and extract.
 // Hash is the sha256 of the zip bytes, optionally prefixed with "sha256:".
 type SkillSource struct {
@@ -68,39 +114,18 @@ type SkillSource struct {
 
 // Validate checks required fields and formats.
 func (s SkillSource) Validate() error {
-	if strings.TrimSpace(s.Name) == "" {
-		return fmt.Errorf("name is required")
+	if err := validateArtifactName(s.Name); err != nil {
+		return err
 	}
-	if s.Name == "." || s.Name == ".." {
-		return fmt.Errorf("name cannot be %q", s.Name)
+	if err := validateArtifactURL(s.URL); err != nil {
+		return err
 	}
-	if !skillNamePattern.MatchString(s.Name) {
-		return fmt.Errorf("name must match [A-Za-z0-9._-]{1,64}: %q", s.Name)
-	}
-
-	if strings.TrimSpace(s.URL) == "" {
-		return fmt.Errorf("url is required")
-	}
-	u, err := url.Parse(s.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("url must be http(s) with a host")
-	}
-
-	if strings.TrimSpace(s.Hash) == "" {
-		return fmt.Errorf("hash is required")
-	}
-	if !isValidSha256Hex(s.NormalizedHash()) {
-		return fmt.Errorf("hash must be 64 hex chars (with optional sha256: prefix)")
-	}
-	return nil
+	return validateArtifactHash(s.Hash)
 }
 
 // NormalizedHash returns the hash with optional "sha256:" prefix stripped,
 // lowercased, and whitespace trimmed. Does NOT revalidate.
-func (s SkillSource) NormalizedHash() string {
-	h := strings.ToLower(strings.TrimSpace(s.Hash))
-	return strings.TrimPrefix(h, "sha256:")
-}
+func (s SkillSource) NormalizedHash() string { return normalizeSha256(s.Hash) }
 
 // isValidSha256Hex reports whether s is exactly 64 lowercase hex chars.
 func isValidSha256Hex(s string) bool {
@@ -151,36 +176,18 @@ func (t ToolSource) LocalRelPath() string { return "./tools/" + t.LocalFileName(
 
 // NormalizedHash returns the hash with optional "sha256:" prefix stripped,
 // lowercased, and whitespace trimmed. Does NOT revalidate.
-func (t ToolSource) NormalizedHash() string {
-	h := strings.ToLower(strings.TrimSpace(t.Hash))
-	return strings.TrimPrefix(h, "sha256:")
-}
+func (t ToolSource) NormalizedHash() string { return normalizeSha256(t.Hash) }
 
 // Validate checks required fields and formats (issue #10 contract).
 func (t ToolSource) Validate() error {
-	if strings.TrimSpace(t.Name) == "" {
-		return fmt.Errorf("name is required")
+	if err := validateArtifactName(t.Name); err != nil {
+		return err
 	}
-	if t.Name == "." || t.Name == ".." {
-		return fmt.Errorf("name cannot be %q", t.Name)
+	if err := validateArtifactURL(t.URL); err != nil {
+		return err
 	}
-	if !skillNamePattern.MatchString(t.Name) {
-		return fmt.Errorf("name must match [A-Za-z0-9._-]{1,64}: %q", t.Name)
-	}
-
-	if strings.TrimSpace(t.URL) == "" {
-		return fmt.Errorf("url is required")
-	}
-	u, err := url.Parse(t.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("url must be http(s) with a host")
-	}
-
-	if strings.TrimSpace(t.Hash) == "" {
-		return fmt.Errorf("hash is required")
-	}
-	if !isValidSha256Hex(t.NormalizedHash()) {
-		return fmt.Errorf("hash must be 64 hex chars (with optional sha256: prefix)")
+	if err := validateArtifactHash(t.Hash); err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(t.FileName) == "" {
