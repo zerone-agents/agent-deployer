@@ -329,6 +329,9 @@ func newRawClient(t *testing.T) *sdk.Client {
 // path: the agent runs with HostPort == 0, is attached to the shared network,
 // and the response carries a container-DNS upstream locator (issue #11).
 func TestIntegration_DockerNetworkTopology(t *testing.T) {
+	dc := requireDocker(t)
+	t.Cleanup(func() { _ = dc.Close() })
+
 	raw := newRawClient(t)
 	ctx := context.Background()
 
@@ -347,8 +350,6 @@ func TestIntegration_DockerNetworkTopology(t *testing.T) {
 		RuntimeExpose:        config.ExposeDockerNetwork,
 		RuntimeNetwork:       netName,
 	}
-	dc := requireDocker(t)
-	t.Cleanup(func() { _ = dc.Close() })
 	svc := service.NewAgentService(cfg, dc)
 
 	agentName := "it-dockernet-" + time.Now().Format("150405")
