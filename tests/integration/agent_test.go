@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/network"
+	sdk "github.com/docker/docker/client"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,4 +313,143 @@ func TestIntegration_AgentLifecycle_WithSkills(t *testing.T) {
 	got, err := os.ReadFile(skillFile)
 	require.NoError(t, err, "skill file should exist at %s", skillFile)
 	assert.Equal(t, "# integration skill\n", string(got))
+}
+
+// newRawClient returns a raw Docker SDK client for network plumbing the
+// deployer wrapper does not expose (test-only).
+func newRawClient(t *testing.T) *sdk.Client {
+	t.Helper()
+	cli, err := sdk.NewClientWithOpts(sdk.FromEnv, sdk.WithAPIVersionNegotiation())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+	return cli
+}
+
+// TestIntegration_DockerNetworkTopology verifies the full no-published-port
+// path: the agent runs with HostPort == 0, is attached to the shared network,
+// and the response carries a container-DNS upstream locator (issue #11).
+func TestIntegration_DockerNetworkTopology(t *testing.T) {
+	raw := newRawClient(t)
+	ctx := context.Background()
+
+	netName := "it-hubnet-" + time.Now().Format("150405")
+	resp, err := raw.NetworkCreate(ctx, netName, network.CreateOptions{})
+	require.NoError(t, err)
+	netID := resp.ID
+	t.Cleanup(func() { _ = raw.NetworkRemove(context.Background(), netID) })
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:              dir,
+		Port:                 18080,
+		RuntimeImage:         runtimeImage,
+		RuntimeContainerPort: 3000,
+		RuntimeExpose:        config.ExposeDockerNetwork,
+		RuntimeNetwork:       netName,
+	}
+	dc := requireDocker(t)
+	t.Cleanup(func() { _ = dc.Close() })
+	svc := service.NewAgentService(cfg, dc)
+
+	agentName := "it-dockernet-" + time.Now().Format("150405")
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(cctx, agentName, true)
+	})
+
+	created, _, err := svc.Create(ctx, &model.CreateAgentRequest{
+		Agent: model.AgentDefinition{
+			Name:         agentName,
+			Description:  "docker-network topology test",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "integration test agent",
+		},
+		Provider:     model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-fake"},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	// Acceptance #4: HostPort == 0 is a legal running state.
+	assert.Equal(t, 0, created.HostPort, "no host port may be published in docker-network mode")
+	assert.Equal(t, model.StatusRunning, created.Status)
+	require.NotNil(t, created.Upstream, "docker-network mode must emit a locator")
+	assert.Equal(t, "http", created.Upstream.Scheme)
+	assert.Equal(t, created.ContainerName, created.Upstream.Host)
+	assert.Equal(t, 3000, created.Upstream.Port)
+
+	// The container is really attached to the shared network.
+	insp, err := dc.InspectContainer(ctx, created.ContainerID)
+	require.NoError(t, err)
+	assert.Contains(t, insp.Networks, netName)
+
+	// Status endpoint agrees with the create response.
+	status, err := svc.GetStatus(ctx, agentName)
+	require.NoError(t, err)
+	require.NotNil(t, status.Upstream)
+	assert.Equal(t, created.ContainerName, status.Upstream.Host)
+
+	// Force redeploy: the locator must follow the new container (acceptance #7).
+	req := &model.CreateAgentRequest{
+		Agent: model.AgentDefinition{
+			Name: agentName, Description: "v2", Model: "claude-sonnet-4-6", SystemPrompt: "updated",
+		},
+		Provider:     model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-fake"},
+		RuntimeToken: "it-runtime-token",
+		Force:        true,
+	}
+	redeployed, _, err := svc.Create(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, redeployed.Upstream)
+	assert.Equal(t, redeployed.ContainerName, redeployed.Upstream.Host)
+	assert.NotEqual(t, created.Upstream.Host, redeployed.Upstream.Host,
+		"old locator must not survive redeploy")
+}
+
+// TestIntegration_LoopbackTopology verifies runtime ports bind to loopback
+// only and the locator reports the loopback address (issue #11, acceptance #3).
+func TestIntegration_LoopbackTopology(t *testing.T) {
+	raw := newRawClient(t)
+	ctx := context.Background()
+
+	cfg := &config.Config{
+		DataDir:              t.TempDir(),
+		Port:                 18080,
+		RuntimeImage:         runtimeImage,
+		RuntimeContainerPort: 3000,
+		RuntimeExpose:        config.ExposeLoopback,
+	}
+	dc := requireDocker(t)
+	t.Cleanup(func() { _ = dc.Close() })
+	svc := service.NewAgentService(cfg, dc)
+
+	agentName := "it-loopback-" + time.Now().Format("150405")
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(cctx, agentName, true)
+	})
+
+	created, _, err := svc.Create(ctx, &model.CreateAgentRequest{
+		Agent: model.AgentDefinition{
+			Name: agentName, Description: "loopback topology test",
+			Model: "claude-sonnet-4-6", SystemPrompt: "integration test agent",
+		},
+		Provider:     model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-fake"},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, created.Upstream)
+	assert.Equal(t, "127.0.0.1", created.Upstream.Host)
+	assert.Equal(t, created.HostPort, created.Upstream.Port)
+	assert.NotZero(t, created.HostPort)
+
+	// The published port really binds to 127.0.0.1, not 0.0.0.0.
+	info, err := raw.ContainerInspect(ctx, created.ContainerID)
+	require.NoError(t, err)
+	bindings := info.NetworkSettings.Ports["3000/tcp"]
+	require.NotEmpty(t, bindings)
+	assert.Equal(t, "127.0.0.1", bindings[0].HostIP,
+		"loopback mode must not publish on 0.0.0.0")
 }
