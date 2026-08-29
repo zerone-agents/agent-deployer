@@ -590,8 +590,10 @@ Notes:
 - The deployer refuses to start in `docker-network` mode when the configured
   network does not exist.
 - Upgrade order with agent-hub: upgrade the hub to a locator-aware version
-  **first**, then switch this deployer to `docker-network` mode, then close the
-  runtime dynamic port range (32768-60999) in the host firewall/security group.
+  **first**, then switch this deployer to `docker-network` mode, then
+  force-redeploy existing agents (`force: true`) so they attach to the shared
+  network and receive a locator, then close the runtime dynamic port range
+  (32768-60999) in the host firewall/security group.
 
 ---
 
