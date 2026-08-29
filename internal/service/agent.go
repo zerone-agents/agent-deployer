@@ -129,7 +129,7 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	agent := req.Agent
 	agent.Name = agentName
 
-	if err := s.storage.WriteAgentYAML(agentName, agent, req.Provider, req.Aigc, req.Hub); err != nil {
+	if err := s.storage.WriteAgentYAML(agentName, agent, req.Provider, req.Aigc, req.Hub, nil); err != nil {
 		return nil, false, fmt.Errorf("write agent YAML: %w", err)
 	}
 
