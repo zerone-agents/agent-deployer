@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -117,24 +118,102 @@ func isValidSha256Hex(s string) bool {
 	return true
 }
 
+// toolFileExts are the file extensions the runtime's customTools loader
+// accepts (issue #10). Case-sensitive: ".TS" is rejected.
+var toolFileExts = map[string]struct{}{".ts": {}, ".mts": {}, ".js": {}, ".mjs": {}}
+
+// ToolSource describes a single custom Tool file to download and install.
+// Hash is the sha256 of the file bytes, optionally prefixed with "sha256:".
+//
+// FileName is metadata and an extension source ONLY: its directory
+// components are never used when constructing the local path — the local
+// file name is always derived from Name plus the validated extension.
+// The runtime derives the Tool name from the file's default-exported
+// definition (required `name` field), never from this file name.
+type ToolSource struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Hash     string `json:"hash"`
+	FileName string `json:"fileName"`
+}
+
+// Ext returns the file extension of FileName (with leading dot).
+func (t ToolSource) Ext() string { return filepath.Ext(t.FileName) }
+
+// LocalFileName returns the deterministic local file name for this Tool:
+// the validated Name plus the validated extension, e.g. "GetWeather.mjs".
+func (t ToolSource) LocalFileName() string { return t.Name + t.Ext() }
+
+// LocalRelPath returns the path written into the runtime agents.yaml,
+// relative to the configDir (the agents/ directory bind-mounted at
+// /app/config): "./tools/GetWeather.mjs".
+func (t ToolSource) LocalRelPath() string { return "./tools/" + t.LocalFileName() }
+
+// NormalizedHash returns the hash with optional "sha256:" prefix stripped,
+// lowercased, and whitespace trimmed. Does NOT revalidate.
+func (t ToolSource) NormalizedHash() string {
+	h := strings.ToLower(strings.TrimSpace(t.Hash))
+	return strings.TrimPrefix(h, "sha256:")
+}
+
+// Validate checks required fields and formats (issue #10 contract).
+func (t ToolSource) Validate() error {
+	if strings.TrimSpace(t.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	if t.Name == "." || t.Name == ".." {
+		return fmt.Errorf("name cannot be %q", t.Name)
+	}
+	if !skillNamePattern.MatchString(t.Name) {
+		return fmt.Errorf("name must match [A-Za-z0-9._-]{1,64}: %q", t.Name)
+	}
+
+	if strings.TrimSpace(t.URL) == "" {
+		return fmt.Errorf("url is required")
+	}
+	u, err := url.Parse(t.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("url must be http(s) with a host")
+	}
+
+	if strings.TrimSpace(t.Hash) == "" {
+		return fmt.Errorf("hash is required")
+	}
+	if !isValidSha256Hex(t.NormalizedHash()) {
+		return fmt.Errorf("hash must be 64 hex chars (with optional sha256: prefix)")
+	}
+
+	if strings.TrimSpace(t.FileName) == "" {
+		return fmt.Errorf("fileName is required")
+	}
+	if _, ok := toolFileExts[t.Ext()]; !ok {
+		return fmt.Errorf("fileName extension must be one of: .ts, .mts, .js, .mjs")
+	}
+	return nil
+}
+
 // AgentDefinition defines the agent configuration received from the client.
 type AgentDefinition struct {
 	Name string `json:"name"`
 	// Description is a short human/agent-readable summary of what the agent
 	// does. Required: agent-runtime 2.0 rejects configs without it, and it is
 	// what the parent agent's Task tool shows when mounting subagents.
-	Description     string                     `json:"description"`
-	Model           string                     `json:"model"`
-	SystemPrompt    string                     `json:"systemPrompt"`
-	MaxTurns        *int                       `json:"maxTurns"`
-	MaxSessionTurns *int                       `json:"maxSessionTurns,omitempty"`
-	PermissionMode  string                     `json:"permissionMode,omitempty"`
-	Tools           []string                   `json:"tools,omitempty"`
-	Skills          []SkillSource              `json:"skills,omitempty"`
-	SettingSources  []string                   `json:"settingSources,omitempty"`
-	Subagents       []SubagentDefinition       `json:"subagents,omitempty"`
-	McpServers      map[string]McpServerConfig `json:"mcpServers,omitempty"`
-	Datasets        map[string]string          `json:"datasets,omitempty"`
+	Description     string   `json:"description"`
+	Model           string   `json:"model"`
+	SystemPrompt    string   `json:"systemPrompt"`
+	MaxTurns        *int     `json:"maxTurns"`
+	MaxSessionTurns *int     `json:"maxSessionTurns,omitempty"`
+	PermissionMode  string   `json:"permissionMode,omitempty"`
+	Tools           []string `json:"tools,omitempty"`
+	// CustomTools lists single-file Tool artifacts to download and install
+	// (issue #10). Tools remains the complete allow-list; CustomTools only
+	// carries the artifacts selected for this agent.
+	CustomTools    []ToolSource               `json:"customTools,omitempty"`
+	Skills         []SkillSource              `json:"skills,omitempty"`
+	SettingSources []string                   `json:"settingSources,omitempty"`
+	Subagents      []SubagentDefinition       `json:"subagents,omitempty"`
+	McpServers     map[string]McpServerConfig `json:"mcpServers,omitempty"`
+	Datasets       map[string]string          `json:"datasets,omitempty"`
 }
 
 // ProviderConfig defines the provider configuration for the LLM API.
@@ -293,6 +372,10 @@ type AgentResponse struct {
 	YamlPath      string      `json:"yamlPath"`
 	SessionDir    string      `json:"sessionDir"`
 	SkillsDir     string      `json:"skillsDir,omitempty"`
+	// ToolsDir is the host-side directory holding installed custom Tool
+	// files. Populated ONLY by Create and only when custom Tools are
+	// declared (parity with skillsDir; not required by runtime behavior).
+	ToolsDir string `json:"toolsDir,omitempty"`
 	// RuntimeToken is the per-agent random token protecting the runtime
 	// container's own HTTP API (injected as ZERONE_AGENT_HTTP_API_KEY).
 	// Populated ONLY by Create: the deployer does not persist it, so Get / List
@@ -408,6 +491,23 @@ func (a *AgentDefinition) Validate() error {
 		if err := skill.Validate(); err != nil {
 			return fmt.Errorf("skills[%d]: %w", i, err)
 		}
+	}
+
+	seenToolNames := make(map[string]struct{}, len(a.CustomTools))
+	seenToolPaths := make(map[string]struct{}, len(a.CustomTools))
+	for i, tool := range a.CustomTools {
+		if _, ok := seenToolNames[tool.Name]; ok {
+			return fmt.Errorf("customTools[%d]: duplicate name %q", i, tool.Name)
+		}
+		seenToolNames[tool.Name] = struct{}{}
+		if err := tool.Validate(); err != nil {
+			return fmt.Errorf("customTools[%d]: %w", i, err)
+		}
+		local := tool.LocalFileName()
+		if _, ok := seenToolPaths[local]; ok {
+			return fmt.Errorf("customTools[%d]: duplicate local file %q", i, local)
+		}
+		seenToolPaths[local] = struct{}{}
 	}
 
 	seenMcp := make(map[string]struct{}, len(a.McpServers))

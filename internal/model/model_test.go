@@ -1656,3 +1656,173 @@ func TestCreateAgentRequest_Validate_ValidHub(t *testing.T) {
 	err := req.Validate()
 	require.NoError(t, err)
 }
+
+// ---- ToolSource (issue #10) ----
+
+func TestToolSource_Validate(t *testing.T) {
+	valid := func(ext string) ToolSource {
+		return ToolSource{
+			Name:     "GetWeather",
+			URL:      "https://example.com/a/file" + ext,
+			Hash:     strings.Repeat("a", 64),
+			FileName: "anything" + ext,
+		}
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*ToolSource)
+		wantErr string
+	}{
+		{"valid ts", func(s *ToolSource) { *s = valid(".ts") }, ""},
+		{"valid mts", func(s *ToolSource) { *s = valid(".mts") }, ""},
+		{"valid js", func(s *ToolSource) { *s = valid(".js") }, ""},
+		{"valid mjs", func(s *ToolSource) { *s = valid(".mjs") }, ""},
+		{"valid sha256-prefixed hash", func(s *ToolSource) {
+			*s = valid(".ts")
+			s.Hash = "sha256:" + strings.Repeat("a", 64)
+		}, ""},
+		{"path-bearing fileName allowed, only ext used", func(s *ToolSource) {
+			*s = valid(".ts")
+			s.FileName = "nested/dir/GetWeather.ts"
+		}, ""},
+		{"missing name", func(s *ToolSource) { s.Name = "" }, "name is required"},
+		{"name dot", func(s *ToolSource) { s.Name = "." }, `name cannot be "."`},
+		{"name dotdot", func(s *ToolSource) { s.Name = ".." }, `name cannot be ".."`},
+		{"name path separator", func(s *ToolSource) { s.Name = "a/b" }, "name must match"},
+		{"missing url", func(s *ToolSource) { s.URL = "" }, "url is required"},
+		{"url not http(s)", func(s *ToolSource) { s.URL = "ftp://example.com/x.ts" }, "url must be http(s) with a host"},
+		{"url no host", func(s *ToolSource) { s.URL = "http://" }, "url must be http(s) with a host"},
+		{"missing hash", func(s *ToolSource) { s.Hash = "" }, "hash is required"},
+		{"hash too short", func(s *ToolSource) { s.Hash = strings.Repeat("a", 63) }, "hash must be 64 hex"},
+		{"hash not hex", func(s *ToolSource) { s.Hash = strings.Repeat("z", 64) }, "hash must be 64 hex"},
+		{"missing fileName", func(s *ToolSource) { s.FileName = "" }, "fileName is required"},
+		{"unsupported extension", func(s *ToolSource) { s.FileName = "x.py"; s.URL = "https://e.com/x.py" }, "extension must be one of"},
+		{"uppercase extension rejected", func(s *ToolSource) { s.FileName = "x.TS"; s.URL = "https://e.com/x.TS" }, "extension must be one of"},
+		{"double extension uses last", func(s *ToolSource) { s.FileName = "x.tar.js"; s.URL = "https://e.com/x.tar.js" }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := valid(".ts")
+			tc.mutate(&src)
+			err := src.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestToolSource_LocalNames(t *testing.T) {
+	src := ToolSource{
+		Name:     "GetWeather",
+		URL:      "https://example.com/a/whatever.mjs",
+		Hash:     strings.Repeat("a", 64),
+		FileName: "downloaded-from-hub.mjs",
+	}
+	if got := src.Ext(); got != ".mjs" {
+		t.Errorf("Ext() = %q, want .mjs", got)
+	}
+	if got := src.LocalFileName(); got != "GetWeather.mjs" {
+		t.Errorf("LocalFileName() = %q, want GetWeather.mjs", got)
+	}
+	if got := src.LocalRelPath(); got != "./tools/GetWeather.mjs" {
+		t.Errorf("LocalRelPath() = %q, want ./tools/GetWeather.mjs", got)
+	}
+	// Directory components of FileName must never leak into the local name.
+	nested := src
+	nested.FileName = "some/dir/file.mjs"
+	if got := nested.LocalFileName(); got != "GetWeather.mjs" {
+		t.Errorf("LocalFileName() with path-bearing fileName = %q, want GetWeather.mjs", got)
+	}
+}
+
+func TestToolSource_NormalizedHash(t *testing.T) {
+	src := ToolSource{Hash: "SHA256:" + strings.Repeat("A", 64)}
+	want := strings.Repeat("a", 64)
+	if got := src.NormalizedHash(); got != want {
+		t.Errorf("NormalizedHash() = %q, want %q", got, want)
+	}
+}
+
+func TestAgentDefinition_Validate_CustomTools(t *testing.T) {
+	base := func() AgentDefinition {
+		return AgentDefinition{
+			Name:         "coder",
+			Description:  "d",
+			Model:        "m",
+			SystemPrompt: "s",
+		}
+	}
+	valid := ToolSource{
+		Name:     "GetWeather",
+		URL:      "https://example.com/x.mjs",
+		Hash:     strings.Repeat("a", 64),
+		FileName: "x.mjs",
+	}
+
+	t.Run("valid customTools", func(t *testing.T) {
+		a := base()
+		a.CustomTools = []ToolSource{valid}
+		if err := a.Validate(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("duplicate names rejected", func(t *testing.T) {
+		a := base()
+		a.CustomTools = []ToolSource{valid, valid}
+		err := a.Validate()
+		if err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("err = %v, want duplicate-name error", err)
+		}
+	})
+
+	t.Run("invalid entry propagates with index", func(t *testing.T) {
+		a := base()
+		bad := valid
+		bad.URL = "ftp://nope"
+		a.CustomTools = []ToolSource{bad}
+		err := a.Validate()
+		if err == nil || !strings.Contains(err.Error(), "customTools[0]") {
+			t.Fatalf("err = %v, want customTools[0] prefix", err)
+		}
+	})
+}
+
+// Regression guard (issue #10): Tools maps to allowedTools semantics (a plain
+// string list) while CustomTools is a structured artifact list — the JSON
+// field names must not drift.
+func TestAgentDefinition_JSONFieldNames(t *testing.T) {
+	data, err := json.Marshal(AgentDefinition{
+		Name:         "a",
+		Description:  "d",
+		Model:        "m",
+		SystemPrompt: "s",
+		Tools:        []string{"Bash"},
+		CustomTools:  []ToolSource{{Name: "GetWeather", URL: "https://e.com/x.mjs", Hash: strings.Repeat("a", 64), FileName: "x.mjs"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["tools"]; !ok {
+		t.Error("json must keep the tools field")
+	}
+	ct, ok := m["customTools"].([]interface{})
+	if !ok || len(ct) != 1 {
+		t.Fatalf("json must keep customTools as a list, got %v", m["customTools"])
+	}
+	first := ct[0].(map[string]interface{})
+	for _, k := range []string{"name", "url", "hash", "fileName"} {
+		if _, ok := first[k]; !ok {
+			t.Errorf("customTools[0] missing json field %q", k)
+		}
+	}
+}
