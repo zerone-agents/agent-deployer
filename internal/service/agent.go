@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/zerone-agent/agent-deployer/internal/config"
@@ -54,17 +56,30 @@ type AgentService struct {
 	dc        DockerClient
 	storage   *storage.AgentStorage
 	installer *skills.Installer
+
+	// dialTCP dials the upstream locator for reachability probing. Injectable
+	// for tests; production default is a 1s TCP dial.
+	dialTCP func(ctx context.Context, addr string) error
 }
 
 // NewAgentService constructs an AgentService wired to the given config and
 // Docker client.
 func NewAgentService(cfg *config.Config, dc DockerClient) *AgentService {
-	return &AgentService{
+	svc := &AgentService{
 		cfg:       cfg,
 		dc:        dc,
 		storage:   storage.NewAgentStorage(cfg.DataDir),
 		installer: skills.NewInstaller(http.DefaultClient, skills.DefaultLimits()),
+		dialTCP: func(ctx context.Context, addr string) error {
+			d := net.Dialer{Timeout: time.Second}
+			conn, err := d.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return err
+			}
+			return conn.Close()
+		},
 	}
+	return svc
 }
 
 // Config returns the configuration the service was constructed with.
@@ -367,7 +382,7 @@ func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.Agent
 		health = "none"
 	}
 
-	return &model.AgentStatusResponse{
+	resp := &model.AgentStatusResponse{
 		AgentName:     c.AgentName,
 		ContainerName: detailed.Name,
 		ContainerID:   detailed.ID,
@@ -376,7 +391,12 @@ func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.Agent
 		HostPort:      detailed.HostPort,
 		Image:         detailed.Image,
 		Upstream:      s.upstreamFor(detailed),
-	}, nil
+	}
+	if s.cfg.UpstreamProbe && resp.Upstream != nil {
+		reachable := s.dialTCP(ctx, net.JoinHostPort(resp.Upstream.Host, strconv.Itoa(resp.Upstream.Port))) == nil
+		resp.UpstreamReachable = &reachable
+	}
+	return resp, nil
 }
 
 // GetLogs returns the last `tail` lines of the agent's container output.

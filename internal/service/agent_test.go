@@ -1283,3 +1283,76 @@ func TestCreate_ClientCannotInjectUpstream(t *testing.T) {
 	assert.Equal(t, "127.0.0.1", resp.Upstream.Host,
 		"a client-injected upstream field must never reach the response")
 }
+
+func TestGetStatus_ProbeReportsReachable(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID: "cid-1", Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder",
+			Status: "running", Networks: []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		UpstreamProbe:  true,
+	})
+	dialed := ""
+	svc.dialTCP = func(_ context.Context, addr string) error {
+		dialed = addr
+		return nil
+	}
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err)
+	require.NotNil(t, resp.Upstream)
+	require.NotNil(t, resp.UpstreamReachable)
+	assert.True(t, *resp.UpstreamReachable)
+	assert.Equal(t, "cloud-agent-coder-aaaaaaaa:3000", dialed)
+}
+
+func TestGetStatus_ProbeReportsUnreachable(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID: "cid-1", Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder",
+			Status: "running", Networks: []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		UpstreamProbe:  true,
+	})
+	svc.dialTCP = func(_ context.Context, _ string) error {
+		return errors.New("connection refused")
+	}
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err, "unreachability is a status, not an error")
+	require.NotNil(t, resp.UpstreamReachable)
+	assert.False(t, *resp.UpstreamReachable)
+}
+
+func TestGetStatus_ProbeSkippedWhenUpstreamNil(t *testing.T) {
+	fake := &fakeDockerClient{
+		existing: &docker.RuntimeContainer{
+			ID: "cid-1", Name: "cloud-agent-coder-aaaaaaaa", AgentName: "coder",
+			Status: "exited", Networks: []string{"hubnet"},
+		},
+	}
+	svc := newTestServiceWithConfig(t, fake, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+		UpstreamProbe:  true,
+	})
+	called := false
+	svc.dialTCP = func(_ context.Context, _ string) error {
+		called = true
+		return nil
+	}
+
+	resp, err := svc.GetStatus(context.Background(), "coder")
+	require.NoError(t, err)
+	assert.Nil(t, resp.Upstream)
+	assert.Nil(t, resp.UpstreamReachable)
+	assert.False(t, called, "nothing to probe when no locator was derived")
+}
