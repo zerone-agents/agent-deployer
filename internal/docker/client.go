@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 
@@ -56,14 +54,6 @@ type CreateOpts struct {
 	RuntimeToken         string // injected as ZERONE_AGENT_HTTP_API_KEY; supplied by caller
 	MemoryBytes          int64  // 0 = unlimited
 	NanoCPUs             int64  // 0 = unlimited
-	// BindHost controls host port publishing. Empty means publish nothing
-	// (docker-network topology — the runtime is reached via container DNS);
-	// otherwise the dynamically assigned host port is bound to this IP
-	// ("0.0.0.0", "127.0.0.1" or a private IP).
-	BindHost string
-	// NetworkName, when non-empty, attaches the container to the named
-	// user-defined Docker network instead of the default bridge.
-	NetworkName string
 }
 
 // NewClient returns a Docker client configured from the environment with
@@ -89,30 +79,16 @@ func (c *Client) Ping(ctx context.Context) (types.Ping, error) {
 	return c.cli.Ping(ctx)
 }
 
-// NetworkExists reports whether a Docker network with the given name exists.
-// Used at startup to fail fast in docker-network mode (issue #11).
-func (c *Client) NetworkExists(ctx context.Context, name string) (bool, error) {
-	_, err := c.cli.NetworkInspect(ctx, name, network.InspectOptions{})
-	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("inspect network %s: %w", name, err)
-	}
-	return true, nil
-}
-
 // RuntimeContainer is the docker-package projection of a managed agent-runtime
 // container. It isolates callers from the Docker SDK types.
 type RuntimeContainer struct {
 	ID         string
-	Name       string   // container name without leading "/"
-	AgentName  string   // from label agent-deployer/agent.name
-	InstanceID string   // from label agent-deployer/agent.instance-id
-	Status     string   // raw Docker state: "running", "exited", "created", etc.
-	Health     string   // Docker health: "starting", "healthy", "unhealthy", "" when no healthcheck
-	HostPort   int      // first public port binding, 0 if none
-	Networks   []string // sorted names of Docker networks the container is attached to
+	Name       string // container name without leading "/"
+	AgentName  string // from label agent-deployer/agent.name
+	InstanceID string // from label agent-deployer/agent.instance-id
+	Status     string // raw Docker state: "running", "exited", "created", etc.
+	Health     string // Docker health: "starting", "healthy", "unhealthy", "" when no healthcheck
+	HostPort   int    // first public port binding, 0 if none
 	Image      string
 	CreatedAt  string // RFC3339 UTC from label agent-deployer/agent.created-at; "" if missing
 }
@@ -137,9 +113,6 @@ func toRuntimeContainer(c types.Container) RuntimeContainer {
 			rc.HostPort = int(p.PublicPort)
 			break
 		}
-	}
-	if c.NetworkSettings != nil {
-		rc.Networks = networkNames(c.NetworkSettings.Networks)
 	}
 	return rc
 }
@@ -210,10 +183,6 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Run
 		rc.CreatedAt = info.Config.Labels[LabelCreatedAt]
 	}
 
-	if info.NetworkSettings != nil {
-		rc.Networks = networkNames(info.NetworkSettings.Networks)
-	}
-
 	return &rc, nil
 }
 
@@ -232,41 +201,6 @@ func extractHostPort(info types.ContainerJSON, c *Client) int {
 		}
 	}
 	return 0
-}
-
-// portBindings returns the host port map for the runtime container port.
-// An empty bindHost means "do not publish" and yields a nil map.
-func portBindings(bindHost string, port nat.Port) nat.PortMap {
-	if bindHost == "" {
-		return nil
-	}
-	return nat.PortMap{port: []nat.PortBinding{{HostIP: bindHost, HostPort: ""}}}
-}
-
-// networkingConfig attaches the container to networkName when non-empty.
-func networkingConfig(networkName string) *network.NetworkingConfig {
-	cfg := &network.NetworkingConfig{}
-	if networkName != "" {
-		cfg.EndpointsConfig = map[string]*network.EndpointSettings{
-			networkName: {},
-		}
-	}
-	return cfg
-}
-
-// networkNames returns the sorted names of the networks a container is
-// attached to. The service layer uses it to verify a container is on the
-// topology-configured shared network before deriving an upstream locator.
-func networkNames(networks map[string]*network.EndpointSettings) []string {
-	if len(networks) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(networks))
-	for name := range networks {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // CreateAgentContainer creates and starts an agent-runtime container and
@@ -299,8 +233,10 @@ func (c *Client) CreateAgentContainer(ctx context.Context, opts CreateOpts) (str
 	}
 
 	hostCfg := &container.HostConfig{
-		PortBindings: portBindings(opts.BindHost, port),
-		Mounts:       hostMounts,
+		PortBindings: nat.PortMap{
+			port: []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: ""}},
+		},
+		Mounts: hostMounts,
 		RestartPolicy: container.RestartPolicy{
 			Name: container.RestartPolicyUnlessStopped,
 		},
@@ -310,7 +246,7 @@ func (c *Client) CreateAgentContainer(ctx context.Context, opts CreateOpts) (str
 		},
 	}
 
-	networkCfg := networkingConfig(opts.NetworkName)
+	networkCfg := &network.NetworkingConfig{}
 
 	createResp, err := c.cli.ContainerCreate(ctx, containerCfg, hostCfg, networkCfg, nil, opts.ContainerName)
 	if err != nil {
@@ -329,12 +265,6 @@ func (c *Client) CreateAgentContainer(ctx context.Context, opts CreateOpts) (str
 	inspectResp, err := c.cli.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return containerID, 0, fmt.Errorf("inspect container: %w", err)
-	}
-
-	if opts.BindHost == "" {
-		// docker-network topology: no host port published; the runtime is
-		// reached via container DNS on the shared network.
-		return containerID, 0, nil
 	}
 
 	bindings, ok := inspectResp.NetworkSettings.Ports[port]

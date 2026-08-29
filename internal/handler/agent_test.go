@@ -55,14 +55,8 @@ func (f *fakeDockerForHandler) ListManagedContainers(_ context.Context) ([]docke
 }
 
 func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts docker.CreateOpts) (string, int, error) {
-	// Faithful to the topology opts: an empty BindHost means publish
-	// nothing (docker-network mode) and a NetworkName attaches the
-	// container to that network.
-	port := 0
-	if opts.BindHost != "" {
-		port = f.nextPort
-		f.nextPort++
-	}
+	port := f.nextPort
+	f.nextPort++
 	c := &docker.RuntimeContainer{
 		ID:         "cid-" + opts.AgentName,
 		Name:       opts.ContainerName,
@@ -71,9 +65,6 @@ func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts dock
 		Status:     "running",
 		HostPort:   port,
 		Image:      opts.Image,
-	}
-	if opts.NetworkName != "" {
-		c.Networks = []string{opts.NetworkName}
 	}
 	f.containers[opts.AgentName] = c
 	f.tokens[c.ID] = opts.RuntimeToken
@@ -145,34 +136,8 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *service.AgentService, *fakeDoc
 	h := handler.NewAgentHandler(svc)
 	r := gin.New()
 	api := r.Group("/api/v1")
-	api.Use(handler.AuthMiddleware(cfg.APIKey, cfg.HubAPIKey))
 	h.Register(api)
 	return r, svc, fakeDC
-}
-
-// setupTestRouterWithConfig is setupTestRouter for tests that need a custom
-// config (e.g. non-public expose topologies).
-func setupTestRouterWithConfig(t *testing.T, cfg *config.Config) (*gin.Engine, *fakeDockerForHandler) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	cfg.DataDir = t.TempDir()
-	if cfg.Port == 0 {
-		cfg.Port = 8080
-	}
-	if cfg.RuntimeImage == "" {
-		cfg.RuntimeImage = "open-agent-runtime:latest"
-	}
-	if cfg.RuntimeContainerPort == 0 {
-		cfg.RuntimeContainerPort = 3000
-	}
-	fakeDC := newFakeDockerForHandler()
-	svc := service.NewAgentService(cfg, fakeDC)
-	h := handler.NewAgentHandler(svc)
-	r := gin.New()
-	api := r.Group("/api/v1")
-	api.Use(handler.AuthMiddleware(cfg.APIKey, cfg.HubAPIKey))
-	h.Register(api)
-	return r, fakeDC
 }
 
 // validRequestBody returns a JSON body for a valid create-agent request.
@@ -796,180 +761,4 @@ func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	if !strings.Contains(resp.Error, "aigc: ") {
 		t.Errorf("error = %q, want it to contain %q", resp.Error, "aigc: ")
 	}
-}
-
-// --- issue #11: upstream locator over HTTP ---
-
-func TestCreate_PublicMode_ResponseOmitsUpstreamKey(t *testing.T) {
-	r, _, _ := setupTestRouter(t) // legacy config: public topology
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
-	req.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusCreated, w.Code)
-	assert.NotContains(t, w.Body.String(), "upstream",
-		"old hubs and ordinary clients must never see the locator field")
-}
-
-func TestCreate_ClientForgedUpstreamFieldIgnored(t *testing.T) {
-	r, _, _ := setupTestRouter(t)
-	body := strings.Replace(string(validRequestBody()), `"force":false`,
-		`"force":false,"upstream":{"scheme":"http","host":"evil.example.com","port":1}`, 1)
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-	assert.NotContains(t, w.Body.String(), "evil.example.com")
-	assert.NotContains(t, w.Body.String(), "upstream",
-		"a client-injected upstream field must not surface in the response")
-}
-
-func TestStatus_DockerNetworkMode_IncludesUpstream(t *testing.T) {
-	r, fake := setupTestRouterWithConfig(t, &config.Config{
-		RuntimeExpose:  config.ExposeDockerNetwork,
-		RuntimeNetwork: "hubnet",
-		HubAPIKey:      "hub-key",
-	})
-	// Seed a live container as docker-network mode would have created it.
-	fake.containers["coder"] = &docker.RuntimeContainer{
-		ID:        "cid-1",
-		Name:      "cloud-agent-coder-aaaaaaaa",
-		AgentName: "coder",
-		Status:    "running",
-		Networks:  []string{"hubnet"},
-	}
-
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodGet, "/api/v1/agents/coder/status", nil)
-	req.Header.Set("X-API-Key", "hub-key")
-	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), `"upstream":{"scheme":"http","host":"cloud-agent-coder-aaaaaaaa","port":3000}`)
-}
-
-func TestUpstream_OnlyServedToHubScope(t *testing.T) {
-	// The same docker-network deployment queried with the general key must
-	// not carry the locator: it never enters ordinary-client DTOs (issue #11,
-	// PR #12 review round 2).
-	r, fake := setupTestRouterWithConfig(t, &config.Config{
-		RuntimeExpose:  config.ExposeDockerNetwork,
-		RuntimeNetwork: "hubnet",
-		APIKey:         "general-key",
-		HubAPIKey:      "hub-key",
-	})
-	fake.containers["coder"] = &docker.RuntimeContainer{
-		ID:        "cid-1",
-		Name:      "cloud-agent-coder-aaaaaaaa",
-		AgentName: "coder",
-		Status:    "running",
-		Networks:  []string{"hubnet"},
-	}
-
-	// Hub-scoped caller sees the locator on every locator-bearing endpoint.
-	for _, path := range []string{"/api/v1/agents", "/api/v1/agents/coder", "/api/v1/agents/coder/status"} {
-		req, _ := http.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("X-API-Key", "hub-key")
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code, "path %s: %s", path, w.Body.String())
-		assert.Contains(t, w.Body.String(), `"upstream":`, "hub-scoped %s must carry the locator", path)
-	}
-
-	// General-key callers get the same resources with the locator stripped.
-	for _, path := range []string{"/api/v1/agents", "/api/v1/agents/coder", "/api/v1/agents/coder/status"} {
-		req, _ := http.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("X-API-Key", "general-key")
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code, "path %s: %s", path, w.Body.String())
-		assert.NotContains(t, w.Body.String(), "upstream", "ordinary-key %s must never carry the locator", path)
-	}
-}
-
-func TestCreate_DockerNetworkMode_RequiresCapabilityHeader(t *testing.T) {
-	// Mixed-version guard (issue #11 acceptance #9, PR #12 review): creating
-	// a portless runtime requires BOTH hub-scoped authentication and the
-	// versioned capability header. The header value is a public constant, so
-	// the scope check is what binds it to the hub — a general-key caller
-	// copying the header must be refused before any container is created.
-	newRouter := func(t *testing.T) (*gin.Engine, *fakeDockerForHandler) {
-		return setupTestRouterWithConfig(t, &config.Config{
-			RuntimeExpose:  config.ExposeDockerNetwork,
-			RuntimeNetwork: "hubnet",
-			APIKey:         "general-key",
-			HubAPIKey:      "hub-key",
-		})
-	}
-	doCreate := func(t *testing.T, r *gin.Engine, apiKey, capability string) *httptest.ResponseRecorder {
-		req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-API-Key", apiKey)
-		if capability != "" {
-			req.Header.Set("X-Hub-Locator-Capability", capability)
-		}
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-		return w
-	}
-
-	t.Run("old hub: header absent", func(t *testing.T) {
-		r, _ := newRouter(t)
-		w := doCreate(t, r, "hub-key", "")
-		assert.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
-		assert.Contains(t, w.Body.String(), "X-Hub-Locator-Capability")
-	})
-
-	t.Run("old hub: stale capability value", func(t *testing.T) {
-		r, _ := newRouter(t)
-		w := doCreate(t, r, "hub-key", "v0")
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
-	t.Run("general key with copied capability header: refused before create", func(t *testing.T) {
-		r, fake := newRouter(t)
-		w := doCreate(t, r, "general-key", "locator-v1")
-		assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
-		assert.Empty(t, fake.containers, "CreateAgentContainer must not be called for non-hub-scoped callers")
-	})
-
-	t.Run("locator-aware hub: creates portless runtime", func(t *testing.T) {
-		r, _ := newRouter(t)
-		w := doCreate(t, r, "hub-key", "locator-v1")
-		require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-		var resp struct {
-			Data model.AgentResponse `json:"data"`
-		}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		assert.Equal(t, 0, resp.Data.HostPort, "docker-network mode publishes no host port")
-		require.NotNil(t, resp.Data.Upstream, "hub-scoped create with capability must carry the locator")
-		assert.Equal(t, resp.Data.ContainerName, resp.Data.Upstream.Host)
-	})
-
-	t.Run("public mode ignores the header", func(t *testing.T) {
-		r, _, _ := setupTestRouter(t) // public topology: no capability gate
-		req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Hub-Locator-Capability", "locator-v1")
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
-	})
-}
-
-func TestStatus_PublicMode_ResponseOmitsUpstreamKey(t *testing.T) {
-	r, _, fake := setupTestRouter(t) // legacy config: public topology
-	fake.containers["coder"] = &docker.RuntimeContainer{
-		ID:        "cid-1",
-		Name:      "cloud-agent-coder-aaaaaaaa",
-		AgentName: "coder",
-		Status:    "running",
-		HostPort:  32768,
-	}
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodGet, "/api/v1/agents/coder/status", nil)
-	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.NotContains(t, w.Body.String(), "upstream",
-		"public topology status responses must not carry the locator field")
 }

@@ -2,11 +2,9 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 type Config struct {
@@ -15,52 +13,8 @@ type Config struct {
 	RuntimeImage         string
 	RuntimeContainerPort int
 	APIKey               string
-	ContainerMemoryBytes int64         // 0 = unlimited
-	ContainerNanoCPUs    int64         // 0 = unlimited
-	RuntimeExpose        RuntimeExpose // default public
-	RuntimeBindIP        string        // private mode: RFC1918 IPv4 the runtime ports bind to
-	RuntimeNetwork       string        // docker-network mode: shared Docker network name
-	UpstreamProbe        bool          // dial the locator in GET status (non-public modes only)
-	HubAPIKey            string        // hub-scoped API key: the only scope served the upstream locator (required in non-public modes)
-}
-
-// RuntimeExpose selects how runtime container ports are exposed and how the
-// trusted upstream locator is derived (issue #11). It is chosen server-side
-// only — never inferred from client input.
-type RuntimeExpose string
-
-const (
-	// ExposePublic publishes dynamic host ports on 0.0.0.0 (legacy behavior,
-	// default). No upstream locator is emitted in responses.
-	ExposePublic RuntimeExpose = "public"
-	// ExposeLoopback publishes dynamic host ports on 127.0.0.1 only.
-	ExposeLoopback RuntimeExpose = "loopback"
-	// ExposeDockerNetwork publishes no host ports; runtimes are reached via
-	// container DNS on a shared Docker network.
-	ExposeDockerNetwork RuntimeExpose = "docker-network"
-	// ExposePrivate publishes dynamic host ports on a configured private IP.
-	ExposePrivate RuntimeExpose = "private"
-)
-
-// HubLocatorCapability is the versioned capability marker a locator-aware
-// agent-hub sends on authenticated deploy requests via the
-// X-Hub-Locator-Capability header. Creating the no-published-port runtimes
-// of docker-network mode is only allowed once this exact value is observed
-// on the request; a pre-locator hub never sends it, so its creates fail
-// fast instead of stranding runtimes behind unreachable addresses
-// (issue #11 acceptance #9).
-const HubLocatorCapability = "locator-v1"
-
-// isPrivateIPv4 reports whether s is an IPv4 literal in an RFC1918 private
-// range (10/8, 172.16/12, 192.168/16). Everything else — public, loopback,
-// wildcard, IPv6, hostnames — is rejected: locator-bearing topologies must
-// never be able to point at a public or unverified host (issue #11).
-func isPrivateIPv4(s string) bool {
-	ip := net.ParseIP(s)
-	if ip == nil || ip.To4() == nil {
-		return false
-	}
-	return !ip.IsLoopback() && !ip.IsUnspecified() && ip.IsPrivate()
+	ContainerMemoryBytes int64 // 0 = unlimited
+	ContainerNanoCPUs    int64 // 0 = unlimited
 }
 
 func Load() (*Config, error) {
@@ -126,81 +80,13 @@ func Load() (*Config, error) {
 		containerMemoryMB = n
 	}
 
-	// Runtime expose topology (issue #11). Default public preserves the legacy
-	// behavior exactly: 0.0.0.0 dynamic ports and no upstream locator.
-	expose := ExposePublic
-	if v := os.Getenv("AGENT_DEPLOYER_RUNTIME_EXPOSE"); v != "" {
-		switch RuntimeExpose(v) {
-		case ExposePublic, ExposeLoopback, ExposeDockerNetwork, ExposePrivate:
-			expose = RuntimeExpose(v)
-		default:
-			return nil, fmt.Errorf("invalid AGENT_DEPLOYER_RUNTIME_EXPOSE %q: must be one of public, loopback, docker-network, private", v)
-		}
-	}
-
-	bindIP := os.Getenv("AGENT_DEPLOYER_RUNTIME_BIND_IP")
-	switch expose {
-	case ExposePrivate:
-		if bindIP == "" {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP is required when AGENT_DEPLOYER_RUNTIME_EXPOSE=private")
-		}
-		if !isPrivateIPv4(bindIP) {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP must be an IPv4 private address (RFC1918: 10/8, 172.16/12, 192.168/16), got %q: public, loopback, wildcard and IPv6 addresses are rejected so the locator can never point at a public host (issue #11)", bindIP)
-		}
-	default:
-		if bindIP != "" {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP is only valid with AGENT_DEPLOYER_RUNTIME_EXPOSE=private")
-		}
-	}
-
-	runtimeNetwork := strings.TrimSpace(os.Getenv("AGENT_DEPLOYER_RUNTIME_NETWORK"))
-	if expose == ExposeDockerNetwork {
-		if runtimeNetwork == "" {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_NETWORK is required when AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network")
-		}
-	} else if runtimeNetwork != "" {
-		return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_NETWORK is only valid with AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network")
-	}
-
-	upstreamProbe := os.Getenv("AGENT_DEPLOYER_UPSTREAM_PROBE") == "true"
-	if upstreamProbe && expose == ExposePublic {
-		return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_PROBE=true requires a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (no locator to probe in public mode)")
-	}
-
-	// Hub-scoped authentication boundary: in non-public topologies the
-	// trusted locator is only served to hub-scoped callers, so a dedicated
-	// hub key — distinct from the general API key — is required. Public mode
-	// must not configure one: it emits no locator, and a hub key there would
-	// be a no-op credential.
-	hubAPIKey := os.Getenv("AGENT_DEPLOYER_HUB_API_KEY")
-	if expose != ExposePublic {
-		if strings.TrimSpace(hubAPIKey) == "" {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_HUB_API_KEY must be set when AGENT_DEPLOYER_RUNTIME_EXPOSE is not public: the trusted upstream locator is only served to hub-scoped callers (issue #11)")
-		}
-	} else if hubAPIKey != "" {
-		return nil, fmt.Errorf("AGENT_DEPLOYER_HUB_API_KEY is only valid with a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (public mode emits no locator)")
-	}
-
-	// The general key serves ordinary clients, which never receive the
-	// locator; a shared value would make every caller hub-scoped and defeat
-	// the boundary.
-	apiKey := os.Getenv("AGENT_DEPLOYER_API_KEY")
-	if apiKey != "" && apiKey == hubAPIKey {
-		return nil, fmt.Errorf("AGENT_DEPLOYER_API_KEY and AGENT_DEPLOYER_HUB_API_KEY must differ: a shared key would make every caller hub-scoped and defeat the locator trust boundary (issue #11)")
-	}
-
 	return &Config{
 		DataDir:              dataDir,
 		Port:                 port,
 		RuntimeImage:         runtimeImage,
 		RuntimeContainerPort: containerPort,
-		APIKey:               apiKey,
-		HubAPIKey:            hubAPIKey,
+		APIKey:               os.Getenv("AGENT_DEPLOYER_API_KEY"),
 		ContainerMemoryBytes: containerMemoryMB * 1024 * 1024,
 		ContainerNanoCPUs:    int64(containerCPUs * 1e9),
-		RuntimeExpose:        expose,
-		RuntimeBindIP:        bindIP,
-		RuntimeNetwork:       runtimeNetwork,
-		UpstreamProbe:        upstreamProbe,
 	}, nil
 }
