@@ -1254,7 +1254,16 @@ func TestCreate_ForceRedeploy_UpstreamPointsAtNewContainer(t *testing.T) {
 		"locator must not survive a redeploy pointing at the old container")
 }
 
-func TestCreate_TwoAgents_DistinctUpstreams(t *testing.T) {
+// TestCreate_DistinctAgentNames_DistinctUpstreams pins the deployer-side
+// tenant-isolation contract: the deployment key is the sanitized agent name,
+// and the hub qualifies same-named agents per tenant into distinct composite
+// names (e.g. tenant1-coder / tenant2-coder). Deployer treats those as
+// opaque, distinct deployments, so their locators can never alias. The
+// same-name replacement case (redeploy) is covered by
+// TestCreate_ForceRedeploy_UpstreamPointsAtNewContainer and the integration
+// force-redeploy test. Deployer itself does not verify tenant identity —
+// authorization stays on the hub side (issue #11).
+func TestCreate_DistinctAgentNames_DistinctUpstreams(t *testing.T) {
 	cfg := &config.Config{RuntimeExpose: config.ExposeDockerNetwork, RuntimeNetwork: "hubnet"}
 
 	reqA := validRequest()
@@ -1272,7 +1281,7 @@ func TestCreate_TwoAgents_DistinctUpstreams(t *testing.T) {
 	require.NotNil(t, respA.Upstream)
 	require.NotNil(t, respB.Upstream)
 	assert.NotEqual(t, respA.Upstream.Host, respB.Upstream.Host,
-		"same-named agents of different tenants must not share a locator")
+		"distinct deployment names (hub tenant-qualified) must never share a locator")
 }
 
 func TestCreate_ClientCannotInjectUpstream(t *testing.T) {
