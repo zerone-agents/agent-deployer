@@ -140,6 +140,29 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *service.AgentService, *fakeDoc
 	return r, svc, fakeDC
 }
 
+// setupTestRouterWithConfig is setupTestRouter for tests that need a custom
+// config (e.g. non-public expose topologies).
+func setupTestRouterWithConfig(t *testing.T, cfg *config.Config) (*gin.Engine, *fakeDockerForHandler) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	cfg.DataDir = t.TempDir()
+	if cfg.Port == 0 {
+		cfg.Port = 8080
+	}
+	if cfg.RuntimeImage == "" {
+		cfg.RuntimeImage = "open-agent-runtime:latest"
+	}
+	if cfg.RuntimeContainerPort == 0 {
+		cfg.RuntimeContainerPort = 3000
+	}
+	fakeDC := newFakeDockerForHandler()
+	svc := service.NewAgentService(cfg, fakeDC)
+	h := handler.NewAgentHandler(svc)
+	r := gin.New()
+	h.Register(r.Group("/api/v1"))
+	return r, fakeDC
+}
+
 // validRequestBody returns a JSON body for a valid create-agent request.
 func validRequestBody() []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
@@ -761,4 +784,52 @@ func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	if !strings.Contains(resp.Error, "aigc: ") {
 		t.Errorf("error = %q, want it to contain %q", resp.Error, "aigc: ")
 	}
+}
+
+// --- issue #11: upstream locator over HTTP ---
+
+func TestCreate_PublicMode_ResponseOmitsUpstreamKey(t *testing.T) {
+	r, _, _ := setupTestRouter(t) // legacy config: public topology
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+	assert.NotContains(t, w.Body.String(), "upstream",
+		"old hubs and ordinary clients must never see the locator field")
+}
+
+func TestCreate_ClientForgedUpstreamFieldIgnored(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body := strings.Replace(string(validRequestBody()), `"force":false`,
+		`"force":false,"upstream":{"scheme":"http","host":"evil.example.com","port":1}`, 1)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+	assert.NotContains(t, w.Body.String(), "evil.example.com")
+	assert.NotContains(t, w.Body.String(), "upstream",
+		"a client-injected upstream field must not surface in the response")
+}
+
+func TestStatus_DockerNetworkMode_IncludesUpstream(t *testing.T) {
+	r, fake := setupTestRouterWithConfig(t, &config.Config{
+		RuntimeExpose:  config.ExposeDockerNetwork,
+		RuntimeNetwork: "hubnet",
+	})
+	// Seed a live container as docker-network mode would have created it.
+	fake.containers["coder"] = &docker.RuntimeContainer{
+		ID:        "cid-1",
+		Name:      "cloud-agent-coder-aaaaaaaa",
+		AgentName: "coder",
+		Status:    "running",
+		Networks:  []string{"hubnet"},
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/api/v1/agents/coder/status", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"upstream":{"scheme":"http","host":"cloud-agent-coder-aaaaaaaa","port":3000}`)
 }
