@@ -17,20 +17,6 @@ services:
       # Set a deployer API key to require authentication on all /api/v1/* endpoints.
       # When empty (default), auth is disabled — fine for local dev, not for production.
       # - AGENT_DEPLOYER_API_KEY=change-me
-      # Runtime network topology (issue #11). Default: public (0.0.0.0 dynamic
-      # ports, no upstream locator). Every non-public mode additionally
-      # requires AGENT_DEPLOYER_HUB_API_KEY (hub-scoped boundary: only this
-      # key is ever served the upstream locator). Options:
-      # - AGENT_DEPLOYER_RUNTIME_EXPOSE=loopback
-      # - AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network
-      #   + AGENT_DEPLOYER_RUNTIME_NETWORK=<shared docker network>
-      #   Hub deploy requests must additionally carry the
-      #   X-Hub-Locator-Capability: locator-v1 header (sent by
-      #   locator-aware agent-hub versions).
-      # - AGENT_DEPLOYER_RUNTIME_EXPOSE=private
-      #   + AGENT_DEPLOYER_RUNTIME_BIND_IP=<RFC1918 private IPv4>
-      # Optional:
-      # - AGENT_DEPLOYER_UPSTREAM_PROBE=true
     volumes:
       # Control the host Docker daemon from inside the deployer
       - /var/run/docker.sock:/var/run/docker.sock
