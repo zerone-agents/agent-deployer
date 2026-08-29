@@ -20,7 +20,6 @@ type Config struct {
 	RuntimeExpose        RuntimeExpose // default public
 	RuntimeBindIP        string        // private mode: RFC1918 IPv4 the runtime ports bind to
 	RuntimeNetwork       string        // docker-network mode: shared Docker network name
-	UpstreamHost         string        // loopback/private mode: locator host override (private IPv4 literal or host.docker.internal); "" = derive
 	UpstreamProbe        bool          // dial the locator in GET status (non-public modes only)
 	HubLocatorCapability string        // docker-network mode: versioned hub capability credential (startup gate only)
 }
@@ -42,13 +41,6 @@ const (
 	// ExposePrivate publishes dynamic host ports on a configured private IP.
 	ExposePrivate RuntimeExpose = "private"
 )
-
-// UpstreamHostDockerInternal is the one non-literal host accepted as an
-// AGENT_DEPLOYER_UPSTREAM_HOST override: the Docker Desktop host gateway used
-// when the hub runs in a container on the same daemon. Every other override
-// must be an IPv4 private literal — arbitrary hostnames cannot be verified to
-// resolve inside the private network (issue #11).
-const UpstreamHostDockerInternal = "host.docker.internal"
 
 // HubLocatorCapability is the versioned capability marker a locator-aware
 // agent-hub deployment exports in its configuration (as
@@ -170,16 +162,6 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_NETWORK is only valid with AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network")
 	}
 
-	upstreamHost := strings.TrimSpace(os.Getenv("AGENT_DEPLOYER_UPSTREAM_HOST"))
-	if upstreamHost != "" {
-		if expose != ExposeLoopback && expose != ExposePrivate {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST is only valid with loopback or private expose modes")
-		}
-		if upstreamHost != UpstreamHostDockerInternal && !isPrivateIPv4(upstreamHost) {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST must be an IPv4 private address or %q, got %q: arbitrary hostnames cannot be verified to resolve inside the private network (issue #11)", UpstreamHostDockerInternal, upstreamHost)
-		}
-	}
-
 	upstreamProbe := os.Getenv("AGENT_DEPLOYER_UPSTREAM_PROBE") == "true"
 	if upstreamProbe && expose == ExposePublic {
 		return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_PROBE=true requires a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (no locator to probe in public mode)")
@@ -219,7 +201,6 @@ func Load() (*Config, error) {
 		RuntimeExpose:        expose,
 		RuntimeBindIP:        bindIP,
 		RuntimeNetwork:       runtimeNetwork,
-		UpstreamHost:         upstreamHost,
 		UpstreamProbe:        upstreamProbe,
 		HubLocatorCapability: hubCapability,
 	}, nil

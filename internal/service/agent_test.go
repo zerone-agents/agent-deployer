@@ -1093,19 +1093,6 @@ func TestCreate_LoopbackTopology(t *testing.T) {
 	assert.Equal(t, "127.0.0.1", fake.created.BindHost)
 }
 
-func TestCreate_LoopbackTopology_HostOverride(t *testing.T) {
-	fake := &fakeDockerClient{}
-	svc := newTestServiceWithConfig(t, fake, &config.Config{
-		RuntimeExpose: config.ExposeLoopback,
-		UpstreamHost:  "host.docker.internal",
-	})
-
-	resp, _, err := svc.Create(context.Background(), validRequest())
-	require.NoError(t, err)
-	require.NotNil(t, resp.Upstream)
-	assert.Equal(t, "host.docker.internal", resp.Upstream.Host)
-}
-
 func TestCreate_PrivateTopology(t *testing.T) {
 	fake := &fakeDockerClient{}
 	svc := newTestServiceWithConfig(t, fake, &config.Config{

@@ -128,16 +128,6 @@ func TestLoad_LoopbackMode(t *testing.T) {
 	assert.Equal(t, ExposeLoopback, cfg.RuntimeExpose)
 }
 
-func TestLoad_LoopbackModeWithHostOverride(t *testing.T) {
-	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-	t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
-	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
-	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "host.docker.internal")
-	cfg, err := Load()
-	require.NoError(t, err)
-	assert.Equal(t, "host.docker.internal", cfg.UpstreamHost)
-}
-
 func TestLoad_LoopbackRejectsBindIP(t *testing.T) {
 	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
@@ -215,42 +205,6 @@ func TestLoad_BindIPAndNetworkOnlyValidInTheirModes(t *testing.T) {
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
 	_, err = Load()
 	require.Error(t, err, "RUNTIME_NETWORK without docker-network mode must fail")
-}
-
-func TestLoad_UpstreamHostOnlyValidInLoopbackOrPrivate(t *testing.T) {
-	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "hub.internal")
-	_, err := Load()
-	require.Error(t, err, "UPSTREAM_HOST in public mode must fail")
-}
-
-func TestLoad_UpstreamHostRejectsGarbage(t *testing.T) {
-	// Arbitrary hostnames cannot be verified to resolve inside the private
-	// network, and public IPs must never serve as the locator host
-	// (issue #11, PR #12 review P1-2).
-	for _, host := range []string{"http://x:1", "evil.example.com", "hub.internal", "8.8.8.8", "47.116.185.214"} {
-		t.Run(host, func(t *testing.T) {
-			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
-			t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", host)
-			_, err := Load()
-			require.Error(t, err, "host %q must be rejected", host)
-		})
-	}
-}
-
-func TestLoad_UpstreamHostAcceptsPrivateIPv4OrDockerInternal(t *testing.T) {
-	for _, host := range []string{"192.168.1.10", "10.0.0.1", "host.docker.internal"} {
-		t.Run(host, func(t *testing.T) {
-			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-			t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
-			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
-			t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", host)
-			cfg, err := Load()
-			require.NoError(t, err)
-			assert.Equal(t, host, cfg.UpstreamHost)
-		})
-	}
 }
 
 func TestLoad_ProbeRequiresNonPublicMode(t *testing.T) {

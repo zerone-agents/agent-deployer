@@ -129,13 +129,15 @@ func (s *AgentService) upstreamFor(c *docker.RuntimeContainer) *model.Upstream {
 		if c.HostPort == 0 {
 			return nil
 		}
+		// The locator host is always the exact address the port is bound to:
+		// loopback mode binds 127.0.0.1, private mode binds RUNTIME_BIND_IP.
+		// No override — a locator advertising anything but the actual bind
+		// address could be syntactically valid yet unreachable (issue #11,
+		// PR #12 review round 2).
 		u = model.Upstream{Scheme: "http", Port: c.HostPort}
-		switch {
-		case s.cfg.UpstreamHost != "":
-			u.Host = s.cfg.UpstreamHost
-		case s.cfg.RuntimeExpose == config.ExposeLoopback:
+		if s.cfg.RuntimeExpose == config.ExposeLoopback {
 			u.Host = "127.0.0.1"
-		default:
+		} else {
 			u.Host = s.cfg.RuntimeBindIP
 		}
 	case config.ExposeDockerNetwork:
