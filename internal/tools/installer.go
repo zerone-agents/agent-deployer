@@ -158,6 +158,12 @@ func (i *Installer) download(ctx context.Context, rawURL, dest string) (_ string
 
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
+		// url.Parse failures are *url.Error values embedding the raw URL.
+		// Keep only the underlying reason (issue #10: never leak URL details).
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return "", err
 	}
 	resp, err := i.client.Do(req)

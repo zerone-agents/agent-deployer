@@ -291,3 +291,17 @@ func bytesRepeat(n int, b byte) []byte {
 	}
 	return out
 }
+
+func TestInstaller_DownloadParseError_DoesNotLeakURL(t *testing.T) {
+	// White-box: download() does not pre-validate, so a malformed URL reaches
+	// http.NewRequestWithContext, whose parse error is a *url.Error embedding
+	// the raw URL. The strip must keep only the reason.
+	inst := NewInstaller(nil, DefaultLimits())
+	_, err := inst.download(context.Background(), "http://ex ample.com/t.js?token=SECRET", filepath.Join(t.TempDir(), "out"))
+	if err == nil {
+		t.Fatal("expected parse failure for malformed URL")
+	}
+	if strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "ex ample.com") {
+		t.Fatalf("error leaks URL details: %v", err)
+	}
+}
