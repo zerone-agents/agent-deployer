@@ -18,15 +18,17 @@ services:
       # When empty (default), auth is disabled — fine for local dev, not for production.
       # - AGENT_DEPLOYER_API_KEY=change-me
       # Runtime network topology (issue #11). Default: public (0.0.0.0 dynamic
-      # ports, no upstream locator). For hub reverse-proxying over internal
-      # networks choose one of:
+      # ports, no upstream locator). Every non-public mode additionally
+      # requires AGENT_DEPLOYER_API_KEY (authenticated boundary for the
+      # locator). Options:
       # - AGENT_DEPLOYER_RUNTIME_EXPOSE=loopback
       # - AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network
       #   + AGENT_DEPLOYER_RUNTIME_NETWORK=<shared docker network>
+      #   + AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY=locator-v1   # exported by locator-aware hub deployments
       # - AGENT_DEPLOYER_RUNTIME_EXPOSE=private
-      #   + AGENT_DEPLOYER_RUNTIME_BIND_IP=<private host IP>
+      #   + AGENT_DEPLOYER_RUNTIME_BIND_IP=<RFC1918 private IPv4>
       # Optional overrides / probe:
-      # - AGENT_DEPLOYER_UPSTREAM_HOST=<locator host override for loopback/private>
+      # - AGENT_DEPLOYER_UPSTREAM_HOST=<private IPv4 or host.docker.internal>
       # - AGENT_DEPLOYER_UPSTREAM_PROBE=true
     volumes:
       # Control the host Docker daemon from inside the deployer

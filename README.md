@@ -111,10 +111,11 @@ All variables are read by the deployer on startup.
 | `AGENT_DEPLOYER_API_KEY` | no | — | When set, all `/api/v1/*` endpoints require authentication. Clients must send `Authorization: Bearer <key>` or `X-API-Key: <key>`. When empty, auth is disabled (local dev only). |
 | `AGENT_DEPLOYER_CONTAINER_CPUS` | no | `2` | CPU cores allocated to each runtime container (e.g. `1.5`). Set to `0` for unlimited. |
 | `AGENT_DEPLOYER_CONTAINER_MEMORY` | no | `2048` | Memory limit per runtime container in MB. Set to `0` for unlimited. |
-| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | no | `public` | Runtime container network topology: `public` / `loopback` / `docker-network` / `private`. Server-side only — determines how runtime containers are reached and whether responses include the server-generated `upstream` locator. |
-| `AGENT_DEPLOYER_RUNTIME_BIND_IP` | private mode only | — | Host IP that runtime ports are published on. Required (and only valid) with `AGENT_DEPLOYER_RUNTIME_EXPOSE=private`; must be a specific routable IP (loopback and wildcard are rejected). |
+| `AGENT_DEPLOYER_RUNTIME_EXPOSE` | no | `public` | Runtime container network topology: `public` / `loopback` / `docker-network` / `private`. Server-side only — determines how runtime containers are reached and whether responses include the server-generated `upstream` locator. Every non-public mode requires `AGENT_DEPLOYER_API_KEY` (authenticated boundary for the locator). |
+| `AGENT_DEPLOYER_RUNTIME_BIND_IP` | private mode only | — | Host IP that runtime ports are published on. Required (and only valid) with `AGENT_DEPLOYER_RUNTIME_EXPOSE=private`; must be an IPv4 RFC1918 private address (public, loopback, wildcard and IPv6 are rejected). |
 | `AGENT_DEPLOYER_RUNTIME_NETWORK` | docker-network mode only | — | Shared Docker network that runtime containers join. Required (and only valid) with `AGENT_DEPLOYER_RUNTIME_EXPOSE=docker-network`. |
-| `AGENT_DEPLOYER_UPSTREAM_HOST` | no | — | Overrides the host in the returned `upstream` locator. Only valid in `loopback` / `private` modes (e.g. `host.docker.internal`). |
+| `AGENT_DEPLOYER_HUB_LOCATOR_CAPABILITY` | docker-network mode only | — | Hub capability credential required to enter docker-network mode; must be exactly `locator-v1`, the versioned marker exported by locator-aware agent-hub deployments (hub config `AGENT_HUB_LOCATOR_CAPABILITY`). A pre-locator hub cannot produce it, so the deployer refuses to start. |
+| `AGENT_DEPLOYER_UPSTREAM_HOST` | no | — | Overrides the host in the returned `upstream` locator. Only valid in `loopback` / `private` modes; accepts a private IPv4 literal or the fixed `host.docker.internal` gateway name. |
 | `AGENT_DEPLOYER_UPSTREAM_PROBE` | no | — | Set to exactly `true` to include `upstreamReachable` in status responses. Rejected in `public` mode. |
 
 The docker-compose deployment additionally accepts:
