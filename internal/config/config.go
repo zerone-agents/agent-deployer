@@ -175,12 +175,21 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_PROBE=true requires a non-public AGENT_DEPLOYER_RUNTIME_EXPOSE (no locator to probe in public mode)")
 	}
 
+	// Locator-bearing topologies require an authenticated boundary: with no
+	// API key the auth middleware is a no-op, and every caller would see
+	// container DNS / private addresses in responses (issue #11, trust
+	// boundary). Public mode keeps the frictionless dev default.
+	apiKey := os.Getenv("AGENT_DEPLOYER_API_KEY")
+	if expose != ExposePublic && apiKey == "" {
+		return nil, fmt.Errorf("AGENT_DEPLOYER_API_KEY must be set when AGENT_DEPLOYER_RUNTIME_EXPOSE is not public: non-public topologies emit the trusted upstream locator, which must only be served to authenticated callers (issue #11)")
+	}
+
 	return &Config{
 		DataDir:              dataDir,
 		Port:                 port,
 		RuntimeImage:         runtimeImage,
 		RuntimeContainerPort: containerPort,
-		APIKey:               os.Getenv("AGENT_DEPLOYER_API_KEY"),
+		APIKey:               apiKey,
 		ContainerMemoryBytes: containerMemoryMB * 1024 * 1024,
 		ContainerNanoCPUs:    int64(containerCPUs * 1e9),
 		RuntimeExpose:        expose,

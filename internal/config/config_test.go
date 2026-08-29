@@ -121,6 +121,7 @@ func TestLoad_InvalidExposeValue(t *testing.T) {
 
 func TestLoad_LoopbackMode(t *testing.T) {
 	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -129,6 +130,7 @@ func TestLoad_LoopbackMode(t *testing.T) {
 
 func TestLoad_LoopbackModeWithHostOverride(t *testing.T) {
 	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
 	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "host.docker.internal")
 	cfg, err := Load()
@@ -172,6 +174,7 @@ func TestLoad_PrivateModeAcceptsPrivateIPv4(t *testing.T) {
 	for _, ip := range []string{"10.2.0.5", "172.16.0.5", "192.168.1.5"} {
 		t.Run(ip, func(t *testing.T) {
 			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", ip)
 			cfg, err := Load()
@@ -191,6 +194,7 @@ func TestLoad_DockerNetworkRequiresNetwork(t *testing.T) {
 
 func TestLoad_DockerNetworkMode(t *testing.T) {
 	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
 	cfg, err := Load()
@@ -238,6 +242,7 @@ func TestLoad_UpstreamHostAcceptsPrivateIPv4OrDockerInternal(t *testing.T) {
 	for _, host := range []string{"192.168.1.10", "10.0.0.1", "host.docker.internal"} {
 		t.Run(host, func(t *testing.T) {
 			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
 			t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", host)
 			cfg, err := Load()
@@ -254,9 +259,50 @@ func TestLoad_ProbeRequiresNonPublicMode(t *testing.T) {
 	require.Error(t, err, "probe in public mode has no locator to dial")
 
 	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	t.Setenv("AGENT_DEPLOYER_API_KEY", "test-key")
 	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
 	t.Setenv("AGENT_DEPLOYER_UPSTREAM_PROBE", "true")
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.True(t, cfg.UpstreamProbe)
+}
+
+// --- PR #12 review P1-1: locator-bearing topologies require auth ---
+
+func TestLoad_NonPublicModeRequiresAPIKey(t *testing.T) {
+	// With no API key the auth middleware is a no-op, so every caller would
+	// see container DNS / private addresses. Non-public topologies emit the
+	// trusted upstream locator, which requires an authenticated boundary
+	// (issue #11, PR #12 review P1-1).
+	cases := map[string]func(t *testing.T){
+		"loopback": func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+		},
+		"private": func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", "10.2.0.5")
+		},
+		"docker-network": func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "docker-network")
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_NETWORK", "hubnet")
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			setup(t)
+			_, err := Load()
+			require.Error(t, err, "expose=%s without API key must fail", name)
+			assert.Contains(t, err.Error(), "AGENT_DEPLOYER_API_KEY")
+		})
+	}
+}
+
+func TestLoad_PublicModeStillWorksWithoutAPIKey(t *testing.T) {
+	// Public mode emits no locator and keeps the frictionless dev default.
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.APIKey)
+	assert.Equal(t, ExposePublic, cfg.RuntimeExpose)
 }
