@@ -50,22 +50,22 @@ type DockerClient interface {
 // AgentService orchestrates the lifecycle of agent containers, coordinating
 // Docker operations, YAML persistence, and naming.
 type AgentService struct {
-	cfg           *config.Config
-	dc            DockerClient
-	storage       *storage.AgentStorage
-	installer     *skills.Installer
-	toolInstaller *tools.Installer
+	cfg            *config.Config
+	dc             DockerClient
+	storage        *storage.AgentStorage
+	skillInstaller *skills.Installer
+	toolInstaller  *tools.Installer
 }
 
 // NewAgentService constructs an AgentService wired to the given config and
 // Docker client.
 func NewAgentService(cfg *config.Config, dc DockerClient) *AgentService {
 	return &AgentService{
-		cfg:           cfg,
-		dc:            dc,
-		storage:       storage.NewAgentStorage(cfg.DataDir),
-		installer:     skills.NewInstaller(http.DefaultClient, skills.DefaultLimits()),
-		toolInstaller: tools.NewInstaller(http.DefaultClient, tools.DefaultLimits()),
+		cfg:            cfg,
+		dc:             dc,
+		storage:        storage.NewAgentStorage(cfg.DataDir),
+		skillInstaller: skills.NewInstaller(http.DefaultClient, skills.DefaultLimits()),
+		toolInstaller:  tools.NewInstaller(http.DefaultClient, tools.DefaultLimits()),
 	}
 }
 
@@ -143,7 +143,7 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		if err != nil {
 			return nil, false, fmt.Errorf("install tool %q: %w", src.Name, err)
 		}
-		customToolPaths = append(customToolPaths, "./"+rel)
+		customToolPaths = append(customToolPaths, rel)
 	}
 
 	if err := s.storage.WriteAgentYAML(agentName, agent, req.Provider, req.Aigc, req.Hub, customToolPaths); err != nil {
@@ -154,7 +154,7 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	// any skill aborts Create; the container is not created. Skills that
 	// already downloaded successfully are left on disk as a valid cache.
 	for _, src := range agent.Skills {
-		if err := s.installer.Install(ctx, src, skillsDir); err != nil {
+		if err := s.skillInstaller.Install(ctx, src, skillsDir); err != nil {
 			return nil, false, fmt.Errorf("install skill %q: %w", src.Name, err)
 		}
 	}

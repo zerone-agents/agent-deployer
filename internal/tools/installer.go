@@ -103,8 +103,9 @@ func NewInstaller(client *http.Client, limits Limits) *Installer {
 }
 
 // Install makes source.Name available at toolsDir/<Name><Ext> and returns
-// the install path relative to the configDir (the parent of toolsDir),
-// e.g. "tools/GetWeather.mjs". Callers write "./"+rel into agents.yaml.
+// the configDir-relative (the parent of toolsDir) agents.yaml path verbatim,
+// e.g. "./tools/GetWeather.mjs" (the ToolSource.LocalRelPath value). Callers
+// write the returned path into agents.yaml unchanged.
 //
 // Behavior:
 //   - Cache hit (marker file matches AND artifact exists): skip download.
@@ -124,7 +125,7 @@ func (i *Installer) Install(ctx context.Context, source model.ToolSource, toolsD
 	dest := filepath.Join(toolsDir, localName)
 	markerPath := dest + ".sha256"
 	want := source.NormalizedHash()
-	rel := "tools/" + localName
+	rel := source.LocalRelPath()
 
 	// Cache hit only when the marker matches AND the artifact still exists.
 	// A marker without an artifact (e.g. manual deletion) re-downloads.

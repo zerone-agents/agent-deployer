@@ -55,8 +55,8 @@ func TestInstaller_Install_AllExtensions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("install %s: %v", ext, err)
 			}
-			if rel != "tools/GetWeather"+ext {
-				t.Fatalf("rel = %q, want tools/GetWeather%s", rel, ext)
+			if rel != "./tools/GetWeather"+ext {
+				t.Fatalf("rel = %q, want ./tools/GetWeather%s", rel, ext)
 			}
 			got, err := os.ReadFile(filepath.Join(dir, "GetWeather"+ext))
 			if err != nil {
