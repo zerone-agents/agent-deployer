@@ -602,3 +602,67 @@ func TestInstaller_Install_PreservesFilesVerbatim(t *testing.T) {
 		assert.NoError(t, statErr, "%q should be preserved verbatim", name)
 	}
 }
+
+// TestInstaller_Install_RedirectTo2xxRejected verifies the absorbed redirect
+// hardening (previously tool-installer-only): a real redirect chain — 307
+// with a Location header pointing at an endpoint that would serve a valid
+// zip — must be rejected outright, not followed.
+func TestInstaller_Install_RedirectTo2xxRejected(t *testing.T) {
+	zipBytes := buildZip(t, map[string]string{"SKILL.md": "# redirected\n"})
+	finalHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(http.StatusTemporaryRedirect) // 307 with Location: real redirect
+		case "/final":
+			finalHits++
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = w.Write(zipBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	inst := NewInstaller(http.DefaultClient, DefaultLimits())
+	skillsDir := t.TempDir()
+	src := model.SkillSource{
+		Name: "redirected",
+		URL:  srv.URL + "/redirect",
+		Hash: sha256Hex(zipBytes),
+	}
+
+	err := inst.Install(context.Background(), src, skillsDir)
+	require.Error(t, err, "redirect chain must be rejected even when the final response is 2xx")
+	assert.ErrorIs(t, err, ErrDownloadFailed)
+	assert.Contains(t, err.Error(), "http status 307")
+	assert.Zero(t, finalHits, "redirect target must never be requested")
+	_, statErr := os.Stat(filepath.Join(skillsDir, "redirected"))
+	assert.True(t, os.IsNotExist(statErr), "no skill dir may be left behind by a rejected redirect")
+}
+
+// TestInstaller_Install_DownloadErrors_DoNotLeakURL verifies the absorbed
+// URL-leak hardening: transport-level *url.Error values embed the full
+// request URL (query strings included — often signed tokens); surfaced
+// errors must contain only the underlying reason.
+func TestInstaller_Install_DownloadErrors_DoNotLeakURL(t *testing.T) {
+	// Shut the server down so Do fails at the transport level with a
+	// *url.Error that would normally embed the full URL + query string.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	urlWithSecret := srv.URL + "/skill.zip?token=SECRET"
+	srv.Close()
+
+	inst := NewInstaller(http.DefaultClient, DefaultLimits())
+	src := model.SkillSource{
+		Name: "leaky",
+		URL:  urlWithSecret,
+		Hash: strings.Repeat("a", 64),
+	}
+	err := inst.Install(context.Background(), src, t.TempDir())
+	require.Error(t, err, "expected download failure against a closed server")
+	assert.ErrorIs(t, err, ErrDownloadFailed)
+	assert.Contains(t, err.Error(), "skill download failed")
+	assert.NotContains(t, err.Error(), "SECRET")
+	assert.NotContains(t, err.Error(), urlWithSecret)
+}

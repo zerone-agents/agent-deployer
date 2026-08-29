@@ -4,25 +4,23 @@
 // config directory (bind-mounted at /app/config), so the runtime resolves
 // them with relative paths and no extra mounts.
 //
-// The installer never parses or executes the file content. It downloads,
-// hash-verifies, and atomically renames into place; import/schema validation
-// belongs to the runtime.
+// The installer never parses or executes the file content. It downloads (via
+// the shared hardened downloader in internal/download), hash-verifies, and
+// atomically renames into place; import/schema validation belongs to the
+// runtime.
 package tools
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/zerone-agent/agent-deployer/internal/download"
 	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
@@ -48,8 +46,11 @@ var (
 	// does not equal the ToolSource.Hash declared by the client.
 	ErrHashMismatch = errors.New("downloaded tool hash does not match declared hash")
 
-	// ErrDownloadFailed wraps any download-time failure: non-2xx HTTP
-	// status, network error, or timeout. Clients should map to HTTP 502.
+	// ErrDownloadFailed wraps any download-time failure: non-2xx HTTP status
+	// (redirects are never followed — every 3xx is rejected), network error,
+	// or timeout. Clients should map to HTTP 502. Local storage faults are
+	// not wrapped here; they surface via download.ErrLocalStorage instead
+	// (handler default: 500).
 	ErrDownloadFailed = errors.New("tool download failed")
 
 	// ErrSizeExceeded is returned when the download exceeds MaxBytes.
@@ -59,12 +60,6 @@ var (
 	// ErrEmptyFile is returned when the download is shorter than MinBytes
 	// (i.e. empty). Clients should map to HTTP 422.
 	ErrEmptyFile = errors.New("tool file is empty")
-
-	// ErrLocalStorage wraps local filesystem failures while persisting a
-	// downloaded tool (create/write/close of the destination file). This is
-	// a deployer-side fault, not an upstream one: clients should map it to
-	// HTTP 500, not 502.
-	ErrLocalStorage = errors.New("tool local storage failure")
 )
 
 // Installer downloads and verifies single custom Tool files. One Installer
@@ -75,31 +70,19 @@ type Installer struct {
 }
 
 // NewInstaller constructs an Installer. client may be nil (defaults to
-// http.DefaultClient); regardless, the caller's client is never used or
-// mutated directly — a shallow copy with redirect following disabled is
-// made instead, because issue #10 rejects non-2xx responses and the first
-// response of a redirect chain is non-2xx. A zero DownloadTimeout is
-// replaced with DefaultLimits() to avoid network hangs (same guard as the
-// skills installer).
+// http.DefaultClient); regardless, the caller's client is never mutated —
+// redirect rejection and the other transport hardening live inside
+// download.Fetch, which shallow-copies the client it is handed. A zero
+// DownloadTimeout is replaced with DefaultLimits() to avoid network hangs
+// (same guard as the skills installer).
 func NewInstaller(client *http.Client, limits Limits) *Installer {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	// Redirects must be rejected, not followed (issue #10: "reject non-2xx
-	// responses" — the first response of a redirect chain is non-2xx).
-	// http.Client has no Clone method, so shallow-copy the struct (Transport
-	// / Jar / Timeout carry over; the shared Transport is safe — it is never
-	// mutated) and set CheckRedirect on the copy, never on the caller's
-	// client. ErrUseLastResponse makes Do return the 3xx response itself,
-	// which the status check then rejects.
-	noRedirect := *client
-	noRedirect.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
 	if limits.DownloadTimeout == 0 {
 		limits = DefaultLimits()
 	}
-	return &Installer{client: &noRedirect, limits: limits}
+	return &Installer{client: client, limits: limits}
 }
 
 // Install makes source.Name available at toolsDir/<Name><Ext> and returns
@@ -149,17 +132,31 @@ func (i *Installer) Install(ctx context.Context, source model.ToolSource, toolsD
 	defer os.RemoveAll(workDir)
 
 	tmpPath := filepath.Join(workDir, "tool.bin")
-	actual, err := i.download(ctx, source.URL, tmpPath)
+	actual, err := download.Fetch(ctx, i.client, source.URL, tmpPath, download.Options{
+		MaxBytes: i.limits.MaxBytes,
+		MinBytes: i.limits.MinBytes,
+		Timeout:  i.limits.DownloadTimeout,
+	})
 	if err != nil {
-		if errors.Is(err, ErrLocalStorage) {
-			// Local disk fault — a deployer-side failure (handler: 500),
-			// never an upstream one. Phase named accurately.
+		switch {
+		case errors.Is(err, download.ErrLocalStorage):
+			// Local disk fault — a deployer-side failure, never an upstream
+			// one. The chain carries download.ErrLocalStorage (handler default:
+			// 500) and must NOT carry ErrDownloadFailed (→ 502).
 			return "", fmt.Errorf("persist tool %q: %w", source.Name, err)
+		case errors.Is(err, download.ErrOversize):
+			return "", fmt.Errorf("download tool %q: %w: %v", source.Name, ErrSizeExceeded, err)
+		case errors.Is(err, download.ErrTooSmall):
+			return "", fmt.Errorf("download tool %q: %w: %v", source.Name, ErrEmptyFile, err)
+		default:
+			// Anything else (incl. download.ErrFailed: transport failure,
+			// rejected redirect, non-2xx status, body read error) is an
+			// upstream failure.
+			if !errors.Is(err, ErrDownloadFailed) {
+				err = fmt.Errorf("%w: %v", ErrDownloadFailed, err)
+			}
+			return "", fmt.Errorf("download tool %q: %w", source.Name, err)
 		}
-		if !errors.Is(err, ErrDownloadFailed) && !errors.Is(err, ErrSizeExceeded) && !errors.Is(err, ErrEmptyFile) {
-			err = fmt.Errorf("%w: %v", ErrDownloadFailed, err)
-		}
-		return "", fmt.Errorf("download tool %q: %w", source.Name, err)
 	}
 
 	if actual != want {
@@ -173,78 +170,4 @@ func (i *Installer) Install(ctx context.Context, source model.ToolSource, toolsD
 		return "", fmt.Errorf("write hash marker for tool %q: %w", source.Name, err)
 	}
 	return rel, nil
-}
-
-// download streams the URL into dest while computing sha256, enforcing the
-// 2xx-only, MaxBytes, MinBytes, and DownloadTimeout limits. It never reads
-// or logs the response body beyond hashing/writing it. Returns the actual
-// lowercase hex sha256 of the downloaded bytes.
-func (i *Installer) download(ctx context.Context, rawURL, dest string) (_ string, err error) {
-	dlCtx, cancel := context.WithTimeout(ctx, i.limits.DownloadTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		// url.Parse failures are *url.Error values embedding the raw URL.
-		// Keep only the underlying reason (issue #10: never leak URL details).
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return "", err
-	}
-	resp, err := i.client.Do(req)
-	if err != nil {
-		// *url.Error embeds the full request URL (incl. query string, often a
-		// signed token) in its message. Keep only the underlying reason so
-		// surfaced errors never leak URL details (issue #10 constraint).
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("%w: http status %d", ErrDownloadFailed, resp.StatusCode)
-	}
-
-	f, err := os.Create(dest)
-	if err != nil {
-		return "", fmt.Errorf("%w: create dest file: %v", ErrLocalStorage, err)
-	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("%w: close dest file: %v", ErrLocalStorage, cerr)
-		}
-	}()
-
-	hasher := sha256.New()
-	var written int64
-	buf := make([]byte, 32*1024)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			written += int64(n)
-			if i.limits.MaxBytes > 0 && written > i.limits.MaxBytes {
-				return "", fmt.Errorf("%w: tool exceeds %d bytes", ErrSizeExceeded, i.limits.MaxBytes)
-			}
-			if _, werr := hasher.Write(buf[:n]); werr != nil {
-				return "", werr
-			}
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				return "", fmt.Errorf("%w: write dest file: %v", ErrLocalStorage, werr)
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return "", readErr
-		}
-	}
-	if i.limits.MinBytes > 0 && written < i.limits.MinBytes {
-		return "", fmt.Errorf("%w: got %d bytes", ErrEmptyFile, written)
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
