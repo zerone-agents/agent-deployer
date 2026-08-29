@@ -72,17 +72,23 @@ func stripStatusUpstream(c *gin.Context, resp *model.AgentStatusResponse) {
 //   - 500 on internal failure
 func (h *AgentHandler) Create(c *gin.Context) {
 	// docker-network mode publishes no host ports, so the only caller that
-	// may create portless runtimes is a locator-aware hub, proven by the
-	// versioned capability header observed on this authenticated request
-	// (issue #11 acceptance #9). A pre-locator hub never sends it, so its
-	// creates fail fast instead of stranding runtimes behind unreachable
-	// addresses.
-	if h.svc.Config().RuntimeExpose == config.ExposeDockerNetwork &&
-		c.GetHeader("X-Hub-Locator-Capability") != config.HubLocatorCapability {
-		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: fmt.Sprintf(
-			"X-Hub-Locator-Capability header must be %q in docker-network mode: upgrade agent-hub to a locator-aware version before deploying portless runtimes",
-			config.HubLocatorCapability)})
-		return
+	// may create portless runtimes is a locator-aware hub: hub-scoped
+	// authentication AND the versioned capability header observed on the
+	// request (issue #11 acceptance #9). The header value is a public
+	// constant, so the scope check is what binds it to the hub — a
+	// general-key caller copying the header is refused before any container
+	// is created.
+	if h.svc.Config().RuntimeExpose == config.ExposeDockerNetwork {
+		if !c.GetBool(ContextKeyHubScope) {
+			c.JSON(http.StatusForbidden, model.ErrorResponse{Success: false, Error: "creating portless runtimes in docker-network mode requires hub-scoped authentication"})
+			return
+		}
+		if c.GetHeader("X-Hub-Locator-Capability") != config.HubLocatorCapability {
+			c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: fmt.Sprintf(
+				"X-Hub-Locator-Capability header must be %q in docker-network mode: upgrade agent-hub to a locator-aware version before deploying portless runtimes",
+				config.HubLocatorCapability)})
+			return
+		}
 	}
 
 	var req model.CreateAgentRequest

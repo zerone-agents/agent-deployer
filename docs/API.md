@@ -590,11 +590,14 @@ Notes:
   same responses with the locator stripped, so it never enters
   ordinary-client DTOs.
 - **Capability-gated creates (`docker-network` mode only):** creating a
-  portless runtime requires the request to carry the versioned capability
-  header `X-Hub-Locator-Capability: locator-v1`, sent by locator-aware
-  agent-hub versions. A pre-locator hub never sends it, so its creates fail
-  with HTTP 400 instead of stranding runtimes behind unreachable addresses —
-  this is the mixed-version guard.
+  portless runtime requires **both** hub-scoped authentication and the
+  versioned capability header `X-Hub-Locator-Capability: locator-v1` sent by
+  locator-aware agent-hub versions. Non-hub-scoped callers get HTTP 403
+  (regardless of the header — its value is public, the scope is the
+  credential); hub-scoped callers missing the header or carrying a stale
+  value get HTTP 400. A pre-locator hub never sends it, so its creates fail
+  fast instead of stranding runtimes behind unreachable addresses — this is
+  the mixed-version guard.
 - **Private stays private:** `AGENT_DEPLOYER_RUNTIME_BIND_IP` accepts only
   IPv4 RFC1918 literals (10/8, 172.16/12, 192.168/16). Public, loopback,
   wildcard and IPv6 addresses are rejected, so the locator can never point at

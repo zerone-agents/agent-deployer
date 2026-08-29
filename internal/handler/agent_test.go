@@ -888,22 +888,23 @@ func TestUpstream_OnlyServedToHubScope(t *testing.T) {
 }
 
 func TestCreate_DockerNetworkMode_RequiresCapabilityHeader(t *testing.T) {
-	// Mixed-version guard (issue #11 acceptance #9, PR #12 review round 2):
-	// a pre-locator hub never sends the capability header, so Create in
-	// docker-network mode refuses to deploy a portless runtime instead of
-	// stranding it behind an unreachable address.
-	newRouter := func(t *testing.T) *gin.Engine {
-		r, _ := setupTestRouterWithConfig(t, &config.Config{
+	// Mixed-version guard (issue #11 acceptance #9, PR #12 review): creating
+	// a portless runtime requires BOTH hub-scoped authentication and the
+	// versioned capability header. The header value is a public constant, so
+	// the scope check is what binds it to the hub — a general-key caller
+	// copying the header must be refused before any container is created.
+	newRouter := func(t *testing.T) (*gin.Engine, *fakeDockerForHandler) {
+		return setupTestRouterWithConfig(t, &config.Config{
 			RuntimeExpose:  config.ExposeDockerNetwork,
 			RuntimeNetwork: "hubnet",
+			APIKey:         "general-key",
 			HubAPIKey:      "hub-key",
 		})
-		return r
 	}
-	doCreate := func(t *testing.T, r *gin.Engine, capability string) *httptest.ResponseRecorder {
+	doCreate := func(t *testing.T, r *gin.Engine, apiKey, capability string) *httptest.ResponseRecorder {
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(validRequestBody()))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-API-Key", "hub-key")
+		req.Header.Set("X-API-Key", apiKey)
 		if capability != "" {
 			req.Header.Set("X-Hub-Locator-Capability", capability)
 		}
@@ -913,18 +914,28 @@ func TestCreate_DockerNetworkMode_RequiresCapabilityHeader(t *testing.T) {
 	}
 
 	t.Run("old hub: header absent", func(t *testing.T) {
-		w := doCreate(t, newRouter(t), "")
+		r, _ := newRouter(t)
+		w := doCreate(t, r, "hub-key", "")
 		assert.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
 		assert.Contains(t, w.Body.String(), "X-Hub-Locator-Capability")
 	})
 
 	t.Run("old hub: stale capability value", func(t *testing.T) {
-		w := doCreate(t, newRouter(t), "v0")
+		r, _ := newRouter(t)
+		w := doCreate(t, r, "hub-key", "v0")
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
+	t.Run("general key with copied capability header: refused before create", func(t *testing.T) {
+		r, fake := newRouter(t)
+		w := doCreate(t, r, "general-key", "locator-v1")
+		assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+		assert.Empty(t, fake.containers, "CreateAgentContainer must not be called for non-hub-scoped callers")
+	})
+
 	t.Run("locator-aware hub: creates portless runtime", func(t *testing.T) {
-		w := doCreate(t, newRouter(t), "locator-v1")
+		r, _ := newRouter(t)
+		w := doCreate(t, r, "hub-key", "locator-v1")
 		require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
 		var resp struct {
 			Data model.AgentResponse `json:"data"`
