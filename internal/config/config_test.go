@@ -153,8 +153,11 @@ func TestLoad_PrivateModeRequiresBindIP(t *testing.T) {
 	assert.Contains(t, err.Error(), "AGENT_DEPLOYER_RUNTIME_BIND_IP")
 }
 
-func TestLoad_PrivateModeRejectsLoopbackOrWildcardIP(t *testing.T) {
-	for _, ip := range []string{"127.0.0.1", "0.0.0.0", "not-an-ip"} {
+func TestLoad_PrivateModeRejectsNonPrivateAddresses(t *testing.T) {
+	// Public, loopback, wildcard, IPv6 and garbage values must all be
+	// rejected: the private-topology locator must never be able to point
+	// at a public host (issue #11, PR #12 review P1-2).
+	for _, ip := range []string{"47.116.185.214", "8.8.8.8", "127.0.0.1", "0.0.0.0", "fd00::1", "not-an-ip"} {
 		t.Run(ip, func(t *testing.T) {
 			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
 			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
@@ -165,13 +168,17 @@ func TestLoad_PrivateModeRejectsLoopbackOrWildcardIP(t *testing.T) {
 	}
 }
 
-func TestLoad_PrivateModeAcceptsRoutableIP(t *testing.T) {
-	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
-	t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", "10.2.0.5")
-	cfg, err := Load()
-	require.NoError(t, err)
-	assert.Equal(t, "10.2.0.5", cfg.RuntimeBindIP)
+func TestLoad_PrivateModeAcceptsPrivateIPv4(t *testing.T) {
+	for _, ip := range []string{"10.2.0.5", "172.16.0.5", "192.168.1.5"} {
+		t.Run(ip, func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "private")
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_BIND_IP", ip)
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, ip, cfg.RuntimeBindIP)
+		})
+	}
 }
 
 func TestLoad_DockerNetworkRequiresNetwork(t *testing.T) {
@@ -213,11 +220,31 @@ func TestLoad_UpstreamHostOnlyValidInLoopbackOrPrivate(t *testing.T) {
 }
 
 func TestLoad_UpstreamHostRejectsGarbage(t *testing.T) {
-	t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
-	t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
-	t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", "http://x:1")
-	_, err := Load()
-	require.Error(t, err)
+	// Arbitrary hostnames cannot be verified to resolve inside the private
+	// network, and public IPs must never serve as the locator host
+	// (issue #11, PR #12 review P1-2).
+	for _, host := range []string{"http://x:1", "evil.example.com", "hub.internal", "8.8.8.8", "47.116.185.214"} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+			t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", host)
+			_, err := Load()
+			require.Error(t, err, "host %q must be rejected", host)
+		})
+	}
+}
+
+func TestLoad_UpstreamHostAcceptsPrivateIPv4OrDockerInternal(t *testing.T) {
+	for _, host := range []string{"192.168.1.10", "10.0.0.1", "host.docker.internal"} {
+		t.Run(host, func(t *testing.T) {
+			t.Setenv("AGENT_DEPLOYER_DATA_DIR", t.TempDir())
+			t.Setenv("AGENT_DEPLOYER_RUNTIME_EXPOSE", "loopback")
+			t.Setenv("AGENT_DEPLOYER_UPSTREAM_HOST", host)
+			cfg, err := Load()
+			require.NoError(t, err)
+			assert.Equal(t, host, cfg.UpstreamHost)
+		})
+	}
 }
 
 func TestLoad_ProbeRequiresNonPublicMode(t *testing.T) {

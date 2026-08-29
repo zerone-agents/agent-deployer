@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
 type Config struct {
@@ -20,9 +18,9 @@ type Config struct {
 	ContainerMemoryBytes int64         // 0 = unlimited
 	ContainerNanoCPUs    int64         // 0 = unlimited
 	RuntimeExpose        RuntimeExpose // default public
-	RuntimeBindIP        string        // private mode: host IP runtime ports bind to
+	RuntimeBindIP        string        // private mode: RFC1918 IPv4 the runtime ports bind to
 	RuntimeNetwork       string        // docker-network mode: shared Docker network name
-	UpstreamHost         string        // loopback/private mode: overrides locator host; "" = derive
+	UpstreamHost         string        // loopback/private mode: locator host override (private IPv4 literal or host.docker.internal); "" = derive
 	UpstreamProbe        bool          // dial the locator in GET status (non-public modes only)
 }
 
@@ -43,6 +41,25 @@ const (
 	// ExposePrivate publishes dynamic host ports on a configured private IP.
 	ExposePrivate RuntimeExpose = "private"
 )
+
+// UpstreamHostDockerInternal is the one non-literal host accepted as an
+// AGENT_DEPLOYER_UPSTREAM_HOST override: the Docker Desktop host gateway used
+// when the hub runs in a container on the same daemon. Every other override
+// must be an IPv4 private literal — arbitrary hostnames cannot be verified to
+// resolve inside the private network (issue #11).
+const UpstreamHostDockerInternal = "host.docker.internal"
+
+// isPrivateIPv4 reports whether s is an IPv4 literal in an RFC1918 private
+// range (10/8, 172.16/12, 192.168/16). Everything else — public, loopback,
+// wildcard, IPv6, hostnames — is rejected: locator-bearing topologies must
+// never be able to point at a public or unverified host (issue #11).
+func isPrivateIPv4(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil || ip.To4() == nil {
+		return false
+	}
+	return !ip.IsLoopback() && !ip.IsUnspecified() && ip.IsPrivate()
+}
 
 func Load() (*Config, error) {
 	dataDir := os.Getenv("AGENT_DEPLOYER_DATA_DIR")
@@ -125,8 +142,8 @@ func Load() (*Config, error) {
 		if bindIP == "" {
 			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP is required when AGENT_DEPLOYER_RUNTIME_EXPOSE=private")
 		}
-		if ip := net.ParseIP(bindIP); ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP must be a specific routable IP, got %q", bindIP)
+		if !isPrivateIPv4(bindIP) {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_RUNTIME_BIND_IP must be an IPv4 private address (RFC1918: 10/8, 172.16/12, 192.168/16), got %q: public, loopback, wildcard and IPv6 addresses are rejected so the locator can never point at a public host (issue #11)", bindIP)
 		}
 	default:
 		if bindIP != "" {
@@ -148,8 +165,8 @@ func Load() (*Config, error) {
 		if expose != ExposeLoopback && expose != ExposePrivate {
 			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST is only valid with loopback or private expose modes")
 		}
-		if !model.ValidateUpstreamHost(upstreamHost) {
-			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST must be a bare hostname or IP literal, got %q", upstreamHost)
+		if upstreamHost != UpstreamHostDockerInternal && !isPrivateIPv4(upstreamHost) {
+			return nil, fmt.Errorf("AGENT_DEPLOYER_UPSTREAM_HOST must be an IPv4 private address or %q, got %q: arbitrary hostnames cannot be verified to resolve inside the private network (issue #11)", UpstreamHostDockerInternal, upstreamHost)
 		}
 	}
 
