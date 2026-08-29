@@ -19,6 +19,7 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/naming"
 	"github.com/zerone-agent/agent-deployer/internal/skills"
 	"github.com/zerone-agent/agent-deployer/internal/storage"
+	"github.com/zerone-agent/agent-deployer/internal/tools"
 )
 
 // Sentinel errors that the HTTP handler matches on to pick the right status code.
@@ -49,20 +50,22 @@ type DockerClient interface {
 // AgentService orchestrates the lifecycle of agent containers, coordinating
 // Docker operations, YAML persistence, and naming.
 type AgentService struct {
-	cfg       *config.Config
-	dc        DockerClient
-	storage   *storage.AgentStorage
-	installer *skills.Installer
+	cfg           *config.Config
+	dc            DockerClient
+	storage       *storage.AgentStorage
+	installer     *skills.Installer
+	toolInstaller *tools.Installer
 }
 
 // NewAgentService constructs an AgentService wired to the given config and
 // Docker client.
 func NewAgentService(cfg *config.Config, dc DockerClient) *AgentService {
 	return &AgentService{
-		cfg:       cfg,
-		dc:        dc,
-		storage:   storage.NewAgentStorage(cfg.DataDir),
-		installer: skills.NewInstaller(http.DefaultClient, skills.DefaultLimits()),
+		cfg:           cfg,
+		dc:            dc,
+		storage:       storage.NewAgentStorage(cfg.DataDir),
+		installer:     skills.NewInstaller(http.DefaultClient, skills.DefaultLimits()),
+		toolInstaller: tools.NewInstaller(http.DefaultClient, tools.DefaultLimits()),
 	}
 }
 
@@ -129,7 +132,21 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	agent := req.Agent
 	agent.Name = agentName
 
-	if err := s.storage.WriteAgentYAML(agentName, agent, req.Provider, req.Aigc, req.Hub, nil); err != nil {
+	// Install all declared custom tools BEFORE writing the YAML and creating
+	// the replacement container (issue #10): any tool failure aborts Create
+	// so an invalid download can never start a container. Successfully
+	// installed tools stay on disk as a valid cache, mirroring skills.
+	var customToolPaths []string
+	toolsDir := filepath.Join(agentDir, "tools")
+	for _, src := range agent.CustomTools {
+		rel, err := s.toolInstaller.Install(ctx, src, toolsDir)
+		if err != nil {
+			return nil, false, fmt.Errorf("install tool %q: %w", src.Name, err)
+		}
+		customToolPaths = append(customToolPaths, "./"+rel)
+	}
+
+	if err := s.storage.WriteAgentYAML(agentName, agent, req.Provider, req.Aigc, req.Hub, customToolPaths); err != nil {
 		return nil, false, fmt.Errorf("write agent YAML: %w", err)
 	}
 
@@ -178,6 +195,13 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		}
 	}
 
+	// The response only advertises toolsDir when custom tools were actually
+	// declared, so tool-less agents keep a compact response payload.
+	toolsDirIfUsed := ""
+	if len(agent.CustomTools) > 0 {
+		toolsDirIfUsed = toolsDir
+	}
+
 	return &model.AgentResponse{
 		AgentName:     agentName,
 		InstanceID:    instanceID,
@@ -189,6 +213,7 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		YamlPath:      filepath.Join(agentDir, "agents.yaml"),
 		SessionDir:    sessionDir,
 		SkillsDir:     skillsDir,
+		ToolsDir:      toolsDirIfUsed,
 		RuntimeToken:  runtimeToken,
 	}, true, nil
 }
