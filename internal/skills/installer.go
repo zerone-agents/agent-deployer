@@ -3,8 +3,6 @@ package skills
 import (
 	"archive/zip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zerone-agent/agent-deployer/internal/download"
 	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
@@ -44,9 +43,12 @@ var (
 	// not equal the SkillSource.Hash declared by the client.
 	ErrHashMismatch = errors.New("downloaded zip hash does not match declared hash")
 
-	// ErrDownloadFailed wraps any download-time failure: HTTP non-200 status,
-	// network error, timeout, or zip size exceeding ZipMaxBytes. Clients should
-	// map this to HTTP 502 (upstream failure).
+	// ErrDownloadFailed wraps any download-time failure: non-200 final HTTP
+	// status (redirects are followed per the legacy skills contract; signed
+	// object-storage/CDN URLs commonly 302/307), network error, timeout, or
+	// zip size exceeding ZipMaxBytes. Clients should map this to HTTP 502
+	// (upstream failure). Local storage faults are not wrapped here; they
+	// surface via download.ErrLocalStorage instead (handler default: 500).
 	ErrDownloadFailed = errors.New("skill download failed")
 
 	// ErrZipSlip wraps extraction failures where a zip entry attempts path
@@ -140,13 +142,35 @@ func (i *Installer) Install(ctx context.Context, source model.SkillSource, skill
 
 	// 下载
 	zipPath := filepath.Join(workDir, "skill.zip")
-	actualHash, err := i.download(ctx, source.URL, zipPath)
+	actualHash, err := download.Fetch(ctx, i.client, source.URL, zipPath, download.Options{
+		MaxBytes: i.limits.ZipMaxBytes,
+		Timeout:  i.limits.DownloadTimeout,
+		// Legacy skills contract (PR #14 third-round review P1): follow the
+		// caller's client redirect policy (Go default: up to 10 hops) and
+		// accept exactly HTTP 200. Real skill zips live behind
+		// object-storage/CDN 302/307 presigned URLs, which the hardened
+		// defaults would break. Tools keep the hardened defaults (issue #10).
+		FollowRedirects: true,
+		RequireStatusOK: true,
+	})
 	if err != nil {
-		// Network/HTTP errors are upstream failures (502). download() already
-		// wraps known cases with ErrDownloadFailed; fall back to wrapping any
-		// unexpected error with the same sentinel so the handler can map it.
-		if !errors.Is(err, ErrDownloadFailed) {
-			err = fmt.Errorf("%w: %v", ErrDownloadFailed, err)
+		switch {
+		case errors.Is(err, download.ErrLocalStorage):
+			// Local disk fault — a deployer-side failure, never an upstream
+			// one. The chain carries download.ErrLocalStorage (handler default:
+			// 500) and must NOT carry ErrDownloadFailed (→ 502). Previously
+			// misclassified as upstream.
+			return fmt.Errorf("persist skill %q: %w", source.Name, err)
+		case errors.Is(err, download.ErrOversize):
+			// Keep the historical 502-class "zip exceeds" message shape.
+			err = fmt.Errorf("%w: zip exceeds %d bytes", ErrDownloadFailed, i.limits.ZipMaxBytes)
+		default:
+			// Network/HTTP errors are upstream failures (502). download.Fetch
+			// wraps known cases with ErrFailed; fall back to wrapping any
+			// unexpected error with the same sentinel so the handler can map it.
+			if !errors.Is(err, ErrDownloadFailed) {
+				err = fmt.Errorf("%w: %v", ErrDownloadFailed, err)
+			}
 		}
 		return fmt.Errorf("download skill %q: %w", source.Name, err)
 	}
@@ -228,66 +252,6 @@ func stripRedundantTopLevelDir(extractDir, skillName string) error {
 		return fmt.Errorf("remove empty wrapper dir: %w", err)
 	}
 	return nil
-}
-
-// download streams the URL into dest while computing sha256.
-// Enforces Limits.ZipMaxBytes and Limits.DownloadTimeout.
-// Returns the actual lowercase hex sha256 of the downloaded bytes.
-func (i *Installer) download(ctx context.Context, url, dest string) (_ string, err error) {
-	dlCtx, cancel := context.WithTimeout(ctx, i.limits.DownloadTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := i.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%w: http status %d", ErrDownloadFailed, resp.StatusCode)
-	}
-
-	f, err := os.Create(dest)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = cerr
-		}
-	}()
-
-	hasher := sha256.New()
-	var written int64
-	buf := make([]byte, 32*1024)
-	for {
-		if i.limits.ZipMaxBytes > 0 && written >= i.limits.ZipMaxBytes {
-			return "", fmt.Errorf("%w: zip exceeds %d bytes", ErrDownloadFailed, i.limits.ZipMaxBytes)
-		}
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if i.limits.ZipMaxBytes > 0 && written+int64(n) > i.limits.ZipMaxBytes {
-				return "", fmt.Errorf("%w: zip exceeds %d bytes", ErrDownloadFailed, i.limits.ZipMaxBytes)
-			}
-			if _, werr := hasher.Write(buf[:n]); werr != nil {
-				return "", werr
-			}
-			if _, werr := f.Write(buf[:n]); werr != nil {
-				return "", werr
-			}
-			written += int64(n)
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return "", readErr
-		}
-	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // extractZip unzips zipPath into dest enforcing Limits.

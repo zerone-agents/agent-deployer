@@ -602,3 +602,98 @@ func TestInstaller_Install_PreservesFilesVerbatim(t *testing.T) {
 		assert.NoError(t, statErr, "%q should be preserved verbatim", name)
 	}
 }
+
+// TestInstaller_Install_FollowsRedirectToZip verifies the restored legacy
+// skills contract (PR #14 third-round review P1): a redirect chain — 302
+// with a Location header pointing at an endpoint serving a hash-matching
+// zip — must be followed (real skill zips live behind object-storage/CDN
+// 302/307 presigned URLs) and the install must succeed off the FINAL
+// response. The download package keeps the mirrored rejection test for the
+// hardened default (307 flavor).
+func TestInstaller_Install_FollowsRedirectToZip(t *testing.T) {
+	zipBytes := buildZip(t, map[string]string{"SKILL.md": "# redirected\n"})
+	finalHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(http.StatusFound) // 302 with Location: presigned-URL shape
+		case "/final":
+			finalHits++
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = w.Write(zipBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	inst := NewInstaller(http.DefaultClient, DefaultLimits())
+	skillsDir := t.TempDir()
+	src := model.SkillSource{
+		Name: "redirected",
+		URL:  srv.URL + "/redirect",
+		Hash: sha256Hex(zipBytes),
+	}
+
+	require.NoError(t, inst.Install(context.Background(), src, skillsDir),
+		"redirect chain to a 200 serving a valid zip must be followed")
+	assert.Equal(t, 1, finalHits, "redirect target must be fetched exactly once")
+	got, err := os.ReadFile(filepath.Join(skillsDir, "redirected", "SKILL.md"))
+	require.NoError(t, err, "skill dir must be populated from the final response")
+	assert.Equal(t, "# redirected\n", string(got))
+}
+
+// TestInstaller_Install_Non200Rejected verifies the other half of the
+// restored legacy skills contract: exactly HTTP 200 is accepted, so a 201
+// serving an otherwise valid zip is rejected (the shared downloader's
+// 2xx-range default does not apply to skills).
+func TestInstaller_Install_Non200Rejected(t *testing.T) {
+	zipBytes := buildZip(t, map[string]string{"SKILL.md": "# created\n"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		w.WriteHeader(http.StatusCreated) // 201: inside the 2xx range, but not 200
+		_, _ = w.Write(zipBytes)
+	}))
+	defer srv.Close()
+
+	inst := NewInstaller(http.DefaultClient, DefaultLimits())
+	skillsDir := t.TempDir()
+	src := model.SkillSource{
+		Name: "created",
+		URL:  srv.URL,
+		Hash: sha256Hex(zipBytes),
+	}
+
+	err := inst.Install(context.Background(), src, skillsDir)
+	require.Error(t, err, "201 must be rejected: skills accept exactly HTTP 200")
+	assert.ErrorIs(t, err, ErrDownloadFailed)
+	assert.Contains(t, err.Error(), "http status 201")
+	_, statErr := os.Stat(filepath.Join(skillsDir, "created"))
+	assert.True(t, os.IsNotExist(statErr), "no skill dir may be left behind by a rejected status")
+}
+
+// TestInstaller_Install_DownloadErrors_DoNotLeakURL verifies the absorbed
+// URL-leak hardening: transport-level *url.Error values embed the full
+// request URL (query strings included — often signed tokens); surfaced
+// errors must contain only the underlying reason.
+func TestInstaller_Install_DownloadErrors_DoNotLeakURL(t *testing.T) {
+	// Shut the server down so Do fails at the transport level with a
+	// *url.Error that would normally embed the full URL + query string.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	urlWithSecret := srv.URL + "/skill.zip?token=SECRET"
+	srv.Close()
+
+	inst := NewInstaller(http.DefaultClient, DefaultLimits())
+	src := model.SkillSource{
+		Name: "leaky",
+		URL:  urlWithSecret,
+		Hash: strings.Repeat("a", 64),
+	}
+	err := inst.Install(context.Background(), src, t.TempDir())
+	require.Error(t, err, "expected download failure against a closed server")
+	assert.ErrorIs(t, err, ErrDownloadFailed)
+	assert.Contains(t, err.Error(), "skill download failed")
+	assert.NotContains(t, err.Error(), "SECRET")
+	assert.NotContains(t, err.Error(), urlWithSecret)
+}

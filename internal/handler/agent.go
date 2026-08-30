@@ -14,6 +14,7 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/model"
 	"github.com/zerone-agent/agent-deployer/internal/service"
 	"github.com/zerone-agent/agent-deployer/internal/skills"
+	"github.com/zerone-agent/agent-deployer/internal/tools"
 )
 
 // AgentHandler wires agent lifecycle operations to HTTP endpoints.
@@ -47,8 +48,8 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 //   - 201 Created when a new container was actually created (or rebuilt via Force)
 //   - 200 OK when an existing container was returned unchanged (idempotent)
 //   - 400 on validation error
-//   - 422 when a declared skill hash is wrong / malicious
-//   - 502 on skill download upstream failure
+//   - 422 when a declared skill/tool hash is wrong or the artifact violates limits
+//   - 502 on skill/tool download upstream failure
 //   - 500 on internal failure
 func (h *AgentHandler) Create(c *gin.Context) {
 	var req model.CreateAgentRequest
@@ -65,12 +66,17 @@ func (h *AgentHandler) Create(c *gin.Context) {
 			status = http.StatusBadRequest
 		case errors.Is(err, skills.ErrHashMismatch),
 			errors.Is(err, skills.ErrZipSlip),
-			errors.Is(err, skills.ErrSizeExceeded):
-			// Client metadata error: the hash they declared corresponds to a
-			// malicious or oversize zip, or doesn't match the actual download.
+			errors.Is(err, skills.ErrSizeExceeded),
+			errors.Is(err, tools.ErrHashMismatch),
+			errors.Is(err, tools.ErrSizeExceeded),
+			errors.Is(err, tools.ErrEmptyFile):
+			// Client metadata error: the hash they declared doesn't match the
+			// actual download, or the artifact violates size constraints.
 			status = http.StatusUnprocessableEntity
-		case errors.Is(err, skills.ErrDownloadFailed):
-			// Upstream failure: HTTP non-200 from skill URL, network error, timeout.
+		case errors.Is(err, skills.ErrDownloadFailed),
+			errors.Is(err, tools.ErrDownloadFailed):
+			// Upstream failure: HTTP non-2xx from the artifact URL, network
+			// error, timeout.
 			status = http.StatusBadGateway
 		}
 		c.JSON(status, model.ErrorResponse{Success: false, Error: err.Error()})

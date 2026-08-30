@@ -727,6 +727,104 @@ func TestAgentHandler_Create_SkillDownloadFailed_Returns502(t *testing.T) {
 	}
 }
 
+// TestAgentHandler_Create_ToolHashMismatch_Returns422 verifies that a custom
+// tool install failure due to hash mismatch is mapped to HTTP 422 (client
+// metadata error), not 500. Per issue #10: the client declared a hash that
+// doesn't match the actual downloaded bytes.
+func TestAgentHandler_Create_ToolHashMismatch_Returns422(t *testing.T) {
+	// Serve bytes that DON'T match the hash the client will declare.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("actual content"))
+	}))
+	defer srv.Close()
+
+	r, _, _ := setupTestRouter(t)
+	body, _ := json.Marshal(model.CreateAgentRequest{
+		Agent: model.AgentDefinition{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+			CustomTools: []model.ToolSource{
+				{
+					Name:     "mismatched",
+					URL:      srv.URL,
+					Hash:     strings.Repeat("a", 64),
+					FileName: "m.js",
+				},
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-test",
+		},
+		RuntimeToken: "test-runtime-token",
+	})
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (422 = client hash wrong); body=%s",
+			w.Code, http.StatusUnprocessableEntity, w.Body.String())
+	}
+	var resp model.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Success {
+		t.Errorf("success = true, want false")
+	}
+	if !strings.Contains(resp.Error, "mismatched") {
+		t.Errorf("error = %q, want it to contain the tool name %q", resp.Error, "mismatched")
+	}
+}
+
+// TestAgentHandler_Create_ToolDownloadFailure_Returns502 verifies that a
+// custom tool install failure due to an upstream HTTP error (server returns
+// 500) is mapped to HTTP 502 (upstream failure), not 500 (deployer crash).
+// Per issue #10: the deployer is a proxy; an upstream download error is 502.
+func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	r, _, _ := setupTestRouter(t)
+	body, _ := json.Marshal(model.CreateAgentRequest{
+		Agent: model.AgentDefinition{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+			CustomTools: []model.ToolSource{
+				{Name: "down", URL: srv.URL, Hash: strings.Repeat("a", 64), FileName: "d.js"},
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-test",
+		},
+		RuntimeToken: "test-runtime-token",
+	})
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d (502 = upstream download failure); body=%s",
+			w.Code, http.StatusBadGateway, w.Body.String())
+	}
+	var resp model.ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Success {
+		t.Errorf("success = true, want false")
+	}
+	if resp.Error == "" {
+		t.Errorf("error message is empty")
+	}
+}
+
 func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{

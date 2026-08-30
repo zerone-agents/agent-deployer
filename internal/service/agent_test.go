@@ -1043,3 +1043,114 @@ func TestAgentService_Create_HubOrgForceRebuild(t *testing.T) {
 		t.Errorf("agents.yaml should have no org after force rebuild without org; content:\n%s", got)
 	}
 }
+
+// toolFile starts a server serving body and returns a matching ToolSource.
+func toolFile(t *testing.T, name, fileName string, body []byte) (model.ToolSource, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	sum := sha256.Sum256(body)
+	return model.ToolSource{
+		Name:     name,
+		URL:      srv.URL,
+		Hash:     hex.EncodeToString(sum[:]),
+		FileName: fileName,
+	}, srv.Close
+}
+
+func TestAgentService_Create_InstallsToolsAndEmitsYAMLPaths(t *testing.T) {
+	body := []byte("export default { name: \"GetWeather\" }")
+	src, stop := toolFile(t, "GetWeather", "downloaded.mjs", body)
+	defer stop()
+
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.Agent.Tools = []string{"GetWeather"}
+	req.Agent.CustomTools = []model.ToolSource{src}
+	resp, _, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+
+	// File installed under the config bind-mount directory.
+	got, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "tools", "GetWeather.mjs"))
+	require.NoError(t, err)
+	assert.Equal(t, string(body), string(got))
+
+	// agents.yaml carries the relative path.
+	data, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "./tools/GetWeather.mjs")
+
+	// Response exposes toolsDir only when custom tools are declared.
+	assert.Equal(t, filepath.Join(dataDir, "coder", "agents", "tools"), resp.ToolsDir)
+
+	// Container was created (install succeeded first).
+	require.NotNil(t, fake.created)
+}
+
+func TestAgentService_Create_ToolFailure_AbortsBeforeContainerCreate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	fake := &fakeDockerClient{}
+	svc, _ := newTestService(t, fake)
+
+	req := validRequest()
+	req.Agent.CustomTools = []model.ToolSource{
+		{Name: "broken", URL: srv.URL, Hash: strings.Repeat("a", 64), FileName: "b.js"},
+	}
+	_, _, err := svc.Create(context.Background(), req)
+	require.Error(t, err)
+	assert.Nil(t, fake.created, "container must NOT be created when tool install fails")
+	assert.Contains(t, err.Error(), "broken")
+}
+
+func TestAgentService_Create_ToolFailure_LeavesEarlierToolsAsCache(t *testing.T) {
+	good := []byte("export default { name: 'Good' }")
+	goodSrc, stop := toolFile(t, "Good", "g.mjs", good)
+	defer stop()
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer badSrv.Close()
+
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.Agent.CustomTools = []model.ToolSource{
+		goodSrc,
+		{Name: "bad", URL: badSrv.URL, Hash: strings.Repeat("a", 64), FileName: "b.js"},
+	}
+	_, _, err := svc.Create(context.Background(), req)
+	require.Error(t, err)
+	assert.Nil(t, fake.created)
+
+	// The successfully-installed tool stays on disk as a valid cache.
+	got, readErr := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "tools", "Good.mjs"))
+	require.NoError(t, readErr)
+	assert.Equal(t, string(good), string(got))
+}
+
+func TestAgentService_Create_NoCustomTools_NoToolsDir(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	resp, _, err := svc.Create(context.Background(), validRequest())
+	require.NoError(t, err)
+	assert.Empty(t, resp.ToolsDir, "toolsDir must be omitted when no custom tools declared")
+
+	// agents.yaml has no customTools key.
+	data, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "customTools")
+
+	// tools/ directory is not created.
+	if _, statErr := os.Stat(filepath.Join(dataDir, "coder", "agents", "tools")); statErr == nil {
+		t.Fatal("tools dir must not be created when no custom tools declared")
+	}
+}

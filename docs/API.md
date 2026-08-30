@@ -97,7 +97,7 @@ export API_KEY=<your key>   # can be omitted when authentication is disabled
 
 ### 1. Create Agent
 
-Creates and starts an agent runtime container. **Agent names are unique (singleton)**; the container name is sanitized and lowercased to `[a-z0-9-]`, serving as the unique identifier across the system.
+Creates and starts an agent runtime container. **Agent names are unique (singleton)**; the container name is sanitized and lowercased to `[a-z0-9-]`, serving as the unique identifier across the system. Custom tools declared in `agent.customTools` are downloaded and hash-verified before the container is created; any install failure aborts the request without starting a container.
 
 - **Idempotency**: if a container with the same name already exists and `force=false` (default), the existing container is returned directly (200 semantics, though the actual status code remains 201); with `force=true`, the old container is stopped + deleted first, then rebuilt with the new configuration (session data is preserved).
 - **Method**: `POST /agents`
@@ -426,7 +426,8 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 | `systemPrompt` | string | Yes | Non-empty | System prompt |
 | `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for the agent |
 | `permissionMode` | string | No | — | Permission mode, e.g. `auto` |
-| `tools` | string[] | No | — | Enabled tool names, e.g. `["Read","Write"]` |
+| `tools` | string[] | No | — | Enabled tool names, e.g. `["Read","Write"]`; the complete allow-list of built-in + custom tool names |
+| `customTools` | ToolSource[] | No | See ToolSource definition; duplicate names/local files rejected | List of custom Tool files to download, hash-verify, and install before container creation |
 | `skills` | SkillSource[] | No | See SkillSource definition | List of skill zips to download/install; only the name is kept as a skill whitelist entry when passed to the runtime |
 | `settingSources` | string[] | No | — | Sources that trigger the runtime to scan the skills filesystem (e.g. `["user","project"]`) **; if not provided, skills are not loaded** |
 | `datasets` | map<string,string> | No | Both `id` and `description` must be non-empty; duplicate `id` in JSON keeps only the last one | Mapping of dataset_id to dataset_description, written into the `datasets` field of `agents.yaml` |
@@ -439,6 +440,19 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 | `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}` | Skill directory name, also the runtime skill whitelist entry |
 | `url` | string | Yes | `http(s)` with a host | Download URL of the skill zip |
 | `hash` | string | Yes | 64-char hex (may carry a `sha256:` prefix) | sha256 of the zip file, used for verification and caching |
+
+### ToolSource
+
+Describes a single custom Tool file to download, hash-verify, and install for the agent (issue #10).
+
+| Field | Type | Required | Validation Rules | Description |
+|---|---|---|---|---|
+| `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}`, must not be `.` or `..` | Safe identifier; determines the local file name (`tools/<name><ext>`) |
+| `url` | string | Yes | `http(s)` with a host | Download URL of the tool file |
+| `hash` | string | Yes | 64-char hex (may carry a `sha256:` prefix) | sha256 of the file bytes, used for verification and caching |
+| `fileName` | string | Yes | Extension must be `.ts` / `.mts` / `.js` / `.mjs` (case-sensitive) | Original file name. Metadata + extension source only; its directory components are never used |
+
+Behavior: files are downloaded (max 5 MiB), stream-hash-verified, and atomically installed under the agent config mount before the replacement container is created. Any tool install failure aborts the request (HTTP 422/502) — no container is started. The runtime derives the tool name from the file's default-exported definition, not the filename. Tools carry full Node.js privileges: only Node built-ins, `@zerone-agent/agent-runtime/tools`, and `zod` are supported; dependencies are not installed.
 
 ### SubagentDefinition
 
@@ -527,6 +541,7 @@ The data structure returned by `POST /agents`, `GET /agents/:name`, and `GET /ag
 | `yamlPath` | string | `POST` only | |
 | `sessionDir` | string | `POST` only | |
 | `skillsDir` | string | `POST` only, and only when skills are declared | |
+| `toolsDir` | string | `POST` only, and only when custom tools are declared | |
 | `runtimeToken` | string | `POST` only | Token provided by the caller, identical to the `ZERONE_AGENT_HTTP_API_KEY` injected into the container; not returned by Get / List |
 
 ### AgentStatus

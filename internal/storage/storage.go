@@ -42,18 +42,21 @@ type runtimeAgentEntry struct {
 	// provider.Protocol passed through verbatim — both sides use the same
 	// enum (anthropic-messages / openai-completions). Field order mirrors
 	// the runtime's own docs example: model, apiType, baseURL, apiKey.
-	APIType         string                           `yaml:"apiType,omitempty"`
-	BaseURL         string                           `yaml:"baseURL,omitempty"`
-	APIKey          string                           `yaml:"apiKey,omitempty"`
-	SystemPrompt    string                           `yaml:"systemPrompt,omitempty"`
-	MaxTurns        *int                             `yaml:"maxTurns,omitempty"`
-	MaxSessionTurns *int                             `yaml:"maxSessionTurns,omitempty"`
-	PermissionMode  string                           `yaml:"permissionMode,omitempty"`
-	AllowedTools    []string                         `yaml:"allowedTools,omitempty"`
-	SettingSources  []string                         `yaml:"settingSources,omitempty"`
-	Subagents       []string                         `yaml:"subagents,omitempty"`
-	McpServers      map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
-	Datasets        map[string]string                `yaml:"datasets,omitempty"`
+	APIType         string   `yaml:"apiType,omitempty"`
+	BaseURL         string   `yaml:"baseURL,omitempty"`
+	APIKey          string   `yaml:"apiKey,omitempty"`
+	SystemPrompt    string   `yaml:"systemPrompt,omitempty"`
+	MaxTurns        *int     `yaml:"maxTurns,omitempty"`
+	MaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
+	PermissionMode  string   `yaml:"permissionMode,omitempty"`
+	AllowedTools    []string `yaml:"allowedTools,omitempty"`
+	// CustomTools lists verified tool file paths relative to the configDir
+	// (issue #10). Main entry only; the runtime resolves them itself.
+	CustomTools    []string                         `yaml:"customTools,omitempty"`
+	SettingSources []string                         `yaml:"settingSources,omitempty"`
+	Subagents      []string                         `yaml:"subagents,omitempty"`
+	McpServers     map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
+	Datasets       map[string]string                `yaml:"datasets,omitempty"`
 }
 
 // runtimeAigcSection is the shape of the top-level "aigc" section in the
@@ -88,8 +91,10 @@ type runtimeAgentsYAML struct {
 }
 
 // WriteAgentYAML writes the agent definition to <agentsDir>/<name>/agents.yaml
-// in the runtime agents.yaml format.
-func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig) error {
+// in the runtime agents.yaml format. customToolPaths are written verbatim
+// (sorted, "./"-relative to the configDir) under the main entry's customTools;
+// nil/empty omits the key.
+func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, customToolPaths []string) error {
 	if strings.TrimSpace(agent.Name) == "" {
 		return fmt.Errorf("agent.Name is required")
 	}
@@ -123,6 +128,13 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 		APIKey:          provider.APIKey,
 		BaseURL:         provider.BaseURL,
 		APIType:         provider.Protocol,
+	}
+
+	if len(customToolPaths) > 0 {
+		sorted := make([]string, len(customToolPaths))
+		copy(sorted, customToolPaths)
+		sort.Strings(sorted)
+		entry.CustomTools = sorted
 	}
 
 	entries := []runtimeAgentEntry{entry}
