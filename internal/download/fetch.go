@@ -1,8 +1,10 @@
-// Package download implements the shared hardened artifact downloader used by
-// the skill and tool installers: redirects are never followed, only final 2xx
-// statuses are accepted, *url.Error wrappers are stripped so surfaced errors
-// never leak request URLs (incl. signed query strings), and size limits are
-// enforced while streaming.
+// Package download implements the shared artifact downloader used by the
+// skill and tool installers: redirects are rejected by default (Options.
+// FollowRedirects restores caller-policy following), final 2xx statuses are
+// accepted by default (Options.RequireStatusOK narrows acceptance to exactly
+// HTTP 200), *url.Error wrappers are stripped so surfaced errors never leak
+// request URLs (incl. signed query strings), and size limits are enforced
+// while streaming.
 package download
 
 import (
@@ -19,7 +21,8 @@ import (
 )
 
 // Options bounds a single Fetch call. The zero value downloads without size
-// limits and without a deadline.
+// limits and without a deadline, rejects redirects, and accepts any final
+// 2xx.
 type Options struct {
 	// MaxBytes caps the streamed body size; 0 = unlimited.
 	MaxBytes int64
@@ -28,11 +31,25 @@ type Options struct {
 	MinBytes int64
 	// Timeout is the overall download deadline; 0 = no deadline.
 	Timeout time.Duration
+
+	// FollowRedirects lets the caller's client redirect policy apply (Go
+	// default: follow up to 10 hops) and validates the FINAL response
+	// status. When false (hardened default), the first 3xx response is
+	// returned as-is and rejected. Skills set true to preserve their
+	// pre-existing contract; tools keep false per issue #10.
+	FollowRedirects bool
+
+	// RequireStatusOK accepts exactly HTTP 200 and rejects every other
+	// status (including 2xx). When false, any final 2xx is accepted.
+	// Skills set true to preserve their pre-existing contract; tools keep
+	// false (issue #10: "reject non-2xx responses").
+	RequireStatusOK bool
 }
 
 var (
-	// ErrFailed wraps transport failures and non-2xx final statuses
-	// (including rejected 3xx). Callers map to their download-failed
+	// ErrFailed wraps transport failures and unacceptable final statuses —
+	// non-2xx by default, any non-200 under Options.RequireStatusOK —
+	// including rejected 3xx. Callers map to their download-failed
 	// sentinel (→ HTTP 502).
 	ErrFailed = errors.New("download failed")
 
@@ -54,11 +71,16 @@ var (
 // returns the lowercase hex digest.
 //
 // Hardening (binding for every caller):
-//   - client is never used or mutated directly: a shallow copy with redirect
-//     following disabled is made instead (net/http has no Client.Clone; the
-//     shallow copy is the canonical idiom), so a 3xx first response is
-//     returned as-is and rejected by the 2xx-only status check — its
-//     Location, if any, is never fetched.
+//   - client is never used or mutated directly: a shallow copy is made
+//     (net/http has no Client.Clone; the shallow copy is the canonical
+//     idiom). By default the copy has redirect following disabled, so a 3xx
+//     first response is returned as-is and rejected by the status check —
+//     its Location, if any, is never fetched. Options.FollowRedirects
+//     restores the caller's redirect policy on the copy (zero-value nil
+//     CheckRedirect = Go default: follow up to 10 hops); the FINAL response
+//     status is validated either way.
+//   - the final status must be 2xx by default; Options.RequireStatusOK
+//     narrows acceptance to exactly HTTP 200.
 //   - *url.Error wrappers from both request construction and transport are
 //     stripped to their underlying cause so surfaced errors never embed the
 //     request URL (which often carries signed query strings).
@@ -66,14 +88,19 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, dest string, opts O
 	if client == nil {
 		client = http.DefaultClient
 	}
-	// Redirects must be rejected, not followed. ErrUseLastResponse makes Do
-	// return the 3xx response itself, which the 2xx-only status check below
-	// then rejects. The shallow copy carries over Transport/Jar/Timeout while
-	// guaranteeing the caller's client is never mutated (the shared Transport
-	// is safe — it is never written).
-	noRedirect := *client
-	noRedirect.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+	// Redirect policy: the hardened default rejects redirects, not follows
+	// them. ErrUseLastResponse makes Do return the 3xx response itself,
+	// which the status check below then rejects. When FollowRedirects is
+	// set, the copy instead inherits the caller's policy untouched
+	// (zero-value nil CheckRedirect = Go default: follow up to 10 hops).
+	// Either way the shallow copy carries over Transport/Jar/Timeout while
+	// guaranteeing the caller's client is never mutated (the shared
+	// Transport is safe — it is never written).
+	fetchClient := *client
+	if !opts.FollowRedirects {
+		fetchClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
 	}
 
 	// A literal context.WithTimeout(ctx, 0) would already be expired, so the
@@ -90,14 +117,18 @@ func Fetch(ctx context.Context, client *http.Client, rawURL, dest string, opts O
 		// Keep only the underlying reason (never leak URL details).
 		return "", fmt.Errorf("%w: %v", ErrFailed, stripURLError(err))
 	}
-	resp, err := noRedirect.Do(req)
+	resp, err := fetchClient.Do(req)
 	if err != nil {
 		// *url.Error embeds the full request URL (incl. query string, often a
 		// signed token) in its message. Keep only the underlying reason.
 		return "", fmt.Errorf("%w: %v", ErrFailed, stripURLError(err))
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if opts.RequireStatusOK {
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("%w: http status %d", ErrFailed, resp.StatusCode)
+		}
+	} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("%w: http status %d", ErrFailed, resp.StatusCode)
 	}
 

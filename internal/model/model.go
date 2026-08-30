@@ -54,9 +54,10 @@ func (m McpServerConfig) Validate() error {
 	return nil
 }
 
-// skillNamePattern restricts SkillSource.Name to safe path characters.
-// Allowed: letters, digits, dot, underscore, hyphen. Length 1-64.
-var skillNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+// artifactNamePattern restricts artifact source names (skill AND tool) to
+// safe path characters. Allowed: letters, digits, dot, underscore, hyphen.
+// Length 1-64.
+var artifactNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // validateArtifactName checks that an artifact source name is present and a
 // single safe path segment. Shared by SkillSource and ToolSource.
@@ -67,7 +68,7 @@ func validateArtifactName(name string) error {
 	if name == "." || name == ".." {
 		return fmt.Errorf("name cannot be %q", name)
 	}
-	if !skillNamePattern.MatchString(name) {
+	if !artifactNamePattern.MatchString(name) {
 		return fmt.Errorf("name must match [A-Za-z0-9._-]{1,64}: %q", name)
 	}
 	return nil

@@ -126,6 +126,76 @@ func TestFetch_RedirectTo2xxRejected(t *testing.T) {
 	}
 }
 
+func TestFetch_FollowRedirects_307To2xxSucceeds(t *testing.T) {
+	// Mirror of TestFetch_RedirectTo2xxRejected with the legacy switch set:
+	// FollowRedirects lets the caller's client policy apply (nil
+	// CheckRedirect = Go default: follow), so the 307 is followed to the
+	// 200 endpoint and the FINAL response body is fetched and hashed.
+	final := []byte("redirected content")
+	finalHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		case "/final":
+			finalHits++
+			_, _ = w.Write(final)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	got, err := Fetch(context.Background(), srv.Client(), srv.URL+"/redirect", dest, Options{FollowRedirects: true})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if finalHits != 1 {
+		t.Fatalf("redirect target must be fetched exactly once (hits = %d)", finalHits)
+	}
+	if want := hashOf(final); got != want {
+		t.Fatalf("digest = %s, want %s", got, want)
+	}
+	onDisk, rerr := os.ReadFile(dest)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !bytes.Equal(onDisk, final) {
+		t.Fatalf("on-disk content mismatch: got %q, want %q", onDisk, final)
+	}
+}
+
+func TestFetch_RequireStatusOK_Rejects201(t *testing.T) {
+	// 201 is a success status in the 2xx range but must be rejected when
+	// the caller narrows acceptance to exactly 200 (legacy skills contract).
+	body := []byte("created")
+	srv := serveBody(t, http.StatusCreated, body)
+	_, err := Fetch(context.Background(), srv.Client(), srv.URL, filepath.Join(t.TempDir(), "o.bin"), Options{RequireStatusOK: true})
+	if !errors.Is(err, ErrFailed) {
+		t.Fatalf("err = %v, want ErrFailed", err)
+	}
+	if !strings.Contains(err.Error(), "http status 201") {
+		t.Fatalf("error should report status 201: %v", err)
+	}
+}
+
+func TestFetch_Default_Accepts201(t *testing.T) {
+	// Default (RequireStatusOK=false): any final 2xx is accepted (issue #10
+	// tools contract: "reject non-2xx responses").
+	body := []byte("created")
+	srv := serveBody(t, http.StatusCreated, body)
+	dest := filepath.Join(t.TempDir(), "o.bin")
+	got, err := Fetch(context.Background(), srv.Client(), srv.URL, dest, Options{})
+	if err != nil {
+		t.Fatalf("201 must be accepted by default: %v", err)
+	}
+	if want := hashOf(body); got != want {
+		t.Fatalf("digest = %s, want %s", got, want)
+	}
+}
+
 func TestFetch_TransportFailure_DoesNotLeakURL(t *testing.T) {
 	// Shut the server down so Do fails at the transport level with a
 	// *url.Error that would normally embed the full URL + query string.

@@ -43,11 +43,12 @@ var (
 	// not equal the SkillSource.Hash declared by the client.
 	ErrHashMismatch = errors.New("downloaded zip hash does not match declared hash")
 
-	// ErrDownloadFailed wraps any download-time failure: non-2xx HTTP status
-	// (redirects are never followed — every 3xx is rejected), network error,
-	// timeout, or zip size exceeding ZipMaxBytes. Clients should map this to
-	// HTTP 502 (upstream failure). Local storage faults are not wrapped here;
-	// they surface via download.ErrLocalStorage instead (handler default: 500).
+	// ErrDownloadFailed wraps any download-time failure: non-200 final HTTP
+	// status (redirects are followed per the legacy skills contract; signed
+	// object-storage/CDN URLs commonly 302/307), network error, timeout, or
+	// zip size exceeding ZipMaxBytes. Clients should map this to HTTP 502
+	// (upstream failure). Local storage faults are not wrapped here; they
+	// surface via download.ErrLocalStorage instead (handler default: 500).
 	ErrDownloadFailed = errors.New("skill download failed")
 
 	// ErrZipSlip wraps extraction failures where a zip entry attempts path
@@ -144,6 +145,13 @@ func (i *Installer) Install(ctx context.Context, source model.SkillSource, skill
 	actualHash, err := download.Fetch(ctx, i.client, source.URL, zipPath, download.Options{
 		MaxBytes: i.limits.ZipMaxBytes,
 		Timeout:  i.limits.DownloadTimeout,
+		// Legacy skills contract (PR #14 third-round review P1): follow the
+		// caller's client redirect policy (Go default: up to 10 hops) and
+		// accept exactly HTTP 200. Real skill zips live behind
+		// object-storage/CDN 302/307 presigned URLs, which the hardened
+		// defaults would break. Tools keep the hardened defaults (issue #10).
+		FollowRedirects: true,
+		RequireStatusOK: true,
 	})
 	if err != nil {
 		switch {
