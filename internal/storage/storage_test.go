@@ -1479,3 +1479,61 @@ func TestReadAgentYAML_LegacySidecarGenerationMismatchIgnored(t *testing.T) {
 	assert.Empty(t, graph.Agents[0].Skills,
 		"artifacts from a mismatched legacy manifest generation must not be merged")
 }
+
+// TestWriteAgentYAML_LegacySidecarNotRemovedBeforeYAMLCommit covers the
+// fifth-review-round window: the legacy sidecar migration must happen AFTER
+// the new agents.yaml commits. A failed update leaves the old deployment —
+// pre-embedded-section YAML AND its matching sidecar — untouched, so the old
+// graph's artifact metadata survives losslessly through the legacy path.
+func TestWriteAgentYAML_LegacySidecarNotRemovedBeforeYAMLCommit(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	agentDir := filepath.Join(dir, "parent", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+
+	// Pre-embedded-section deployment: YAML without the section + a matching
+	// legacy sidecar (correct digest binding).
+	oldYAML := []byte("agents:\n  - id: parent\n    description: d\n    systemPrompt: s\n  - id: child-a\n    description: c\n    systemPrompt: p\n")
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), oldYAML, 0644))
+	legacy := map[string]any{
+		"rootAgentID": "parent",
+		"yamlDigest":  sha256Hex(oldYAML),
+		"artifacts": map[string]any{
+			"child-a": map[string]any{
+				"skills": []any{map[string]any{"name": "old-skill", "url": "https://example.com/o.zip", "hash": strings.Repeat("a", 64)}},
+			},
+		},
+	}
+	out, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json"), out, 0644))
+
+	// The redeploy fails while STAGING the new YAML — before any commit.
+	require.NoError(t, os.Mkdir(filepath.Join(agentDir, "agents.yaml.tmp"), 0755))
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2"},
+		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "new-skill", URL: "https://example.com/n.zip", Hash: strings.Repeat("c", 64)}}},
+	}
+	err = store.WriteAgentYAML("parent", agents,
+		model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
+	require.Error(t, err)
+
+	// The old deployment — YAML AND its legacy sidecar — is untouched and
+	// still reads back with its original artifact metadata.
+	assert.FileExists(t, filepath.Join(agentDir, "deploy-manifest.json"),
+		"legacy sidecar must survive a failed update")
+	graph, rerr := store.ReadAgentYAML("parent")
+	require.NoError(t, rerr)
+	require.Len(t, graph.Agents, 2)
+	var child *model.AgentDefinition
+	for i := range graph.Agents {
+		if graph.Agents[i].Name == "child-a" {
+			child = &graph.Agents[i]
+		}
+	}
+	require.NotNil(t, child)
+	require.Len(t, child.Skills, 1)
+	assert.Equal(t, "old-skill", child.Skills[0].Name,
+		"the old deployment's artifacts must survive via the legacy sidecar path")
+}

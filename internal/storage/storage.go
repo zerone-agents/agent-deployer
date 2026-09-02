@@ -228,13 +228,6 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("create agent directory: %w", err)
 	}
 
-	// Migrate away any legacy sidecar from pre-embedded-section deployments;
-	// the embedded section above supersedes it, and read-back must never mix
-	// the two representations.
-	if err := removeLegacyManifest(agentDir); err != nil {
-		return err
-	}
-
 	// agents.yaml is the SINGLE authoritative document (graph + artifact
 	// declarations): staged tmp + atomic rename. A failed or interrupted
 	// update leaves the previous deployment fully intact and losslessly
@@ -245,6 +238,16 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	}
 	if err := os.Rename(yamlTmp, filepath.Join(agentDir, "agents.yaml")); err != nil {
 		return fmt.Errorf("replace agent YAML: %w", err)
+	}
+
+	// Only AFTER the new YAML committed do we migrate away the legacy sidecar
+	// (fifth review round): a failed update above must leave the old YAML AND
+	// its matching sidecar untouched, so the old deployment — including its
+	// artifact metadata — reads back losslessly through the legacy path. A
+	// leftover sidecar next to a committed embedded-section YAML is harmless:
+	// read-back prefers the embedded section and never mixes representations.
+	if err := removeLegacyManifest(agentDir); err != nil {
+		return err
 	}
 
 	return nil
