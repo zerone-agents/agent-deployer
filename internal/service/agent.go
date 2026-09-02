@@ -152,7 +152,10 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		return nil, false, err
 	}
 
-	if err := s.storage.WriteAgentYAML(agentName, req.Agents, req.Provider, req.Aigc, req.Hub, agentToolPaths); err != nil {
+	// agentName == req.RootAgentID until the service split (issue #18 task 3):
+	// passing both explicitly keeps this call behavior-identical while the
+	// storage signature is already split.
+	if err := s.storage.WriteAgentYAML(agentName, req.RootAgentID, req.Agents, req.Provider, req.Aigc, req.Hub, agentToolPaths); err != nil {
 		return nil, false, fmt.Errorf("write agent YAML: %w", err)
 	}
 
