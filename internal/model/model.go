@@ -17,11 +17,12 @@ import (
 // apply. Tighten MaxTurns if a subagent runs too long. See agent-runtime
 // issue #1 for the full rationale.
 type SubagentDefinition struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Prompt      string   `json:"prompt"`
-	Tools       []string `json:"tools,omitempty"`
-	MaxTurns    *int     `json:"maxTurns,omitempty"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Prompt      string            `json:"prompt"`
+	Tools       []string          `json:"tools,omitempty"`
+	MaxTurns    *int              `json:"maxTurns,omitempty"`
+	Datasets    map[string]string `json:"datasets,omitempty"`
 }
 
 // McpServerConfig describes a single MCP server configuration.
@@ -545,6 +546,11 @@ func (s *SubagentDefinition) Validate() error {
 	}
 	if strings.TrimSpace(s.Prompt) == "" {
 		return fmt.Errorf("prompt is required")
+	}
+	for id, description := range s.Datasets {
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(description) == "" {
+			return fmt.Errorf("datasets must have non-empty ids and descriptions")
+		}
 	}
 	return nil
 }

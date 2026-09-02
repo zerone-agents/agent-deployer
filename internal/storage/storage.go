@@ -141,10 +141,9 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 
 	// Runtime 2.0 mount-by-reference: each subagent becomes a first-class
 	// top-level entry, and the main entry references it by id. Subagent
-	// entries carry only the 5 fields the runtime maps when mounting
-	// (description, systemPrompt, allowedTools, disallowedTools, maxTurns) —
-	// model, mcpServers and per-agent credentials are intentionally omitted
-	// because they do not apply in the mounted context.
+	// Subagent entries carry their own prompt, tool allow-list and dataset
+	// catalog. MCP connections remain parent-runtime resources, while the
+	// child-specific allow-list selects its aliased knowledge tool.
 	if len(agent.Subagents) > 0 {
 		entries[0].Subagents = make([]string, 0, len(agent.Subagents))
 		for _, sub := range agent.Subagents {
@@ -156,6 +155,7 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 				SystemPrompt: sub.Prompt,
 				AllowedTools: sub.Tools,
 				MaxTurns:     sub.MaxTurns,
+				Datasets:     sub.Datasets,
 			})
 		}
 	}
@@ -268,6 +268,7 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error
 			Prompt:      sub.SystemPrompt,
 			Tools:       sub.AllowedTools,
 			MaxTurns:    sub.MaxTurns,
+			Datasets:    sub.Datasets,
 		})
 	}
 

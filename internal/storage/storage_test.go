@@ -463,6 +463,27 @@ func TestWriteAndReadAgentYAML_WithMcpServers(t *testing.T) {
 	assert.Equal(t, "reviewer", readAgent.Subagents[0].Name)
 }
 
+func TestWriteAndReadAgentYAML_SubagentDatasets(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	maxTurns := 5
+	agent := model.AgentDefinition{
+		Name: "parent", Description: "parent", Model: "model",
+		Subagents: []model.SubagentDefinition{{
+			Name: "researcher", Description: "research", Prompt: "use knowledge",
+			MaxTurns: &maxTurns,
+			Datasets: map[string]string{"child-kb": "Child-only knowledge"},
+		}},
+	}
+	provider := model.ProviderConfig{Protocol: "openai-completions", BaseURL: "https://example.com", APIKey: "key"}
+
+	require.NoError(t, store.WriteAgentYAML("parent", agent, provider, nil, nil, nil))
+	read, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	require.Len(t, read.Subagents, 1)
+	assert.Equal(t, agent.Subagents[0].Datasets, read.Subagents[0].Datasets)
+}
+
 func TestWriteAgentYAML_McpServersUsesTransportField(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
