@@ -75,6 +75,28 @@ func (h *AgentHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// The renamed session-cap field must also be rejected explicitly: Go's
+	// JSON decoder silently drops unknown struct fields, so a payload
+	// carrying the legacy maxSessionTurns key would otherwise deploy with
+	// the cap silently lost.
+	if rawAgents, ok := probe["agents"]; ok {
+		var agentEntries []json.RawMessage
+		if err := json.Unmarshal(rawAgents, &agentEntries); err == nil {
+			for _, raw := range agentEntries {
+				var entry map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &entry); err == nil {
+					if _, legacy := entry["maxSessionTurns"]; legacy {
+						c.JSON(http.StatusBadRequest, model.ErrorResponse{
+							Success: false,
+							Error:   `legacy field "maxSessionTurns" is no longer supported: the session cap was renamed to "maxSessionQueries" (runtime v2.6.0+ / SDK 3.1.0); update the request body`,
+						})
+						return
+					}
+				}
+			}
+		}
+	}
+
 	var req model.CreateAgentRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: err.Error()})

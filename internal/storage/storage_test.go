@@ -1862,3 +1862,39 @@ func TestListAgentDirs_AcceptsDotSkillsNames(t *testing.T) {
 	assert.Equal(t, []string{".skills-prod", "alpha", "beta"}, names,
 		"dot-prefixed agent ids must not be filtered from the list")
 }
+
+// TestReadAgentYAML_LegacyMaxSessionTurnsKeyPreserved guards the
+// twelfth-review P1: a deployment written before the SDK 3.1.0 rename kept
+// the session cap under maxSessionTurns; read-back must map it to
+// maxSessionQueries instead of silently dropping it on upgrade.
+func TestReadAgentYAML_LegacyMaxSessionTurnsKeyPreserved(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "legacy", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), []byte(
+		"agents:\n  - id: legacy\n    description: d\n    systemPrompt: p\n    maxSessionTurns: 50\n"), 0644))
+
+	graph, err := NewAgentStorage(dir).ReadAgentYAML("legacy")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 1)
+	require.NotNil(t, graph.Agents[0].MaxSessionQueries)
+	assert.Equal(t, 50, *graph.Agents[0].MaxSessionQueries,
+		"the pre-rename on-disk cap must survive the upgrade")
+}
+
+// TestWriteAgentYAML_MaxSessionQueriesNeverWrittenAsLegacyKey ensures new
+// deployments only ever emit the new contract key.
+func TestWriteAgentYAML_MaxSessionQueriesNeverWrittenAsLegacyKey(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	queries := 50
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "p", MaxSessionQueries: &queries},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, model.ProviderConfig{}, nil, nil, nil))
+
+	yamlBytes, err := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(yamlBytes), "maxSessionQueries: 50")
+	assert.NotContains(t, string(yamlBytes), "maxSessionTurns", "new writes must use the renamed key only")
+}

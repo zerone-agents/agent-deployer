@@ -9,6 +9,18 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/storage"
 )
 
+// declaresMaxSessionQueries reports whether any agent in the graph uses the
+// maxSessionQueries contract key, which requires runtime v2.6.0+ (SDK 3.1.0
+// rename; pre-2.6.0 runtimes silently strip it).
+func declaresMaxSessionQueries(agents []model.AgentDefinition) bool {
+	for _, a := range agents {
+		if a.MaxSessionQueries != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // installClosureTools materializes the custom Tool artifacts declared by every
 // agent in the deployment graph (issue #16 extends the issue #10 rule to the
 // closure). Any failure aborts Create. Tools land in the shared flat

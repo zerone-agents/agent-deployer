@@ -54,12 +54,18 @@ type runtimeAgentEntry struct {
 	// externalized (runtime v2.4.0+ mutual-exclusion refine): a path relative
 	// to the configDir, pointing at prompts/<id>-<hash>.md inside the agents
 	// directory. Keeps long prompts out of the YAML document.
-	SystemPromptFile  string   `yaml:"systemPromptFile,omitempty"`
-	MaxTurns          *int     `yaml:"maxTurns,omitempty"`
-	MaxSessionQueries *int     `yaml:"maxSessionQueries,omitempty"`
-	PermissionMode    string   `yaml:"permissionMode,omitempty"`
-	AllowedTools      []string `yaml:"allowedTools,omitempty"`
-	DisallowedTools   []string `yaml:"disallowedTools,omitempty"`
+	SystemPromptFile  string `yaml:"systemPromptFile,omitempty"`
+	MaxTurns          *int   `yaml:"maxTurns,omitempty"`
+	MaxSessionQueries *int   `yaml:"maxSessionQueries,omitempty"`
+	// LegacyMaxSessionTurns reads the pre-rename contract key
+	// (maxSessionTurns) from deployments written before SDK 3.1.0's rename
+	// (runtime PR #56): without it, upgrading deployer would silently lose
+	// the session cap stored on disk. Read-only — writes always use
+	// maxSessionQueries.
+	LegacyMaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
+	PermissionMode        string   `yaml:"permissionMode,omitempty"`
+	AllowedTools          []string `yaml:"allowedTools,omitempty"`
+	DisallowedTools       []string `yaml:"disallowedTools,omitempty"`
 	// CustomTools lists verified tool file paths relative to the configDir (issue
 	// #10); each entry carries only the paths its own agent declared. The
 	// runtime resolves them itself.
@@ -532,6 +538,12 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, cerr)
 			}
 			def.SystemPrompt = string(content)
+		}
+		// Pre-rename deployments stored the session cap under
+		// maxSessionTurns (SDK 3.1.0 rename, runtime PR #56); fall back so an
+		// upgrade never silently drops the on-disk cap.
+		if def.MaxSessionQueries == nil && e.LegacyMaxSessionTurns != nil {
+			def.MaxSessionQueries = e.LegacyMaxSessionTurns
 		}
 		graph.Agents = append(graph.Agents, def)
 	}

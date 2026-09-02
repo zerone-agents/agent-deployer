@@ -960,3 +960,43 @@ func TestCreateAgent_DisallowedToolsRoundTripsToYAML(t *testing.T) {
 	}
 	assert.Equal(t, []string{"Bash", "Write"}, childDisallowed)
 }
+
+// TestCreateAgent_400_LegacyMaxSessionTurns guards the twelfth-review P1:
+// the renamed field must be rejected explicitly — Go's JSON decoder silently
+// drops unknown struct fields, so a payload carrying the legacy
+// maxSessionTurns key would otherwise deploy with the cap silently lost.
+func TestCreateAgent_400_LegacyMaxSessionTurns(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body, err := json.Marshal(map[string]any{
+		"rootAgentId": "coder",
+		"agents": []map[string]any{
+			{"name": "coder", "description": "d", "model": "m", "systemPrompt": "p", "maxSessionTurns": 50},
+		},
+		"provider":      map[string]any{"protocol": "anthropic-messages", "baseUrl": "https://x", "lockedApiKey": "k"},
+		"runtime_token": "t",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "maxSessionQueries",
+		"the 400 must carry the migration diagnostic naming the new field")
+}
+
+// TestCreateAgent_AcceptsMaxSessionQueries proves the new contract name is
+// not rejected by the legacy-field guard and flows through Create.
+func TestCreateAgent_AcceptsMaxSessionQueries(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body, err := json.Marshal(map[string]any{
+		"rootAgentId": "coder",
+		"agents": []map[string]any{
+			{"name": "coder", "description": "d", "model": "m", "systemPrompt": "p", "maxSessionQueries": 50},
+		},
+		"provider":      map[string]any{"protocol": "anthropic-messages", "baseUrl": "https://x", "lockedApiKey": "k"},
+		"runtime_token": "t",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+}

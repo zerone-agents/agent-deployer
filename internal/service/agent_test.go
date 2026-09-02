@@ -1192,22 +1192,29 @@ func TestAgentService_Create_InstallsArtifactsForWholeClosure(t *testing.T) {
 	assert.False(t, rootHasExtra, "root without skills gets no extraUserSkillDirs")
 }
 
-// TestAgentService_Create_RuntimeImageGate guards the runtime v2.4.0+ floor
-// for the agent graph protocol: pinned tags below 2.4.0 and unassumed
-// :latest images must refuse deployment instead of silently degrading.
+// TestAgentService_Create_RuntimeImageGate guards the runtime version floors
+// for the agent graph protocol: the base v2.4.0 floor, raised to v2.6.0 when
+// the graph declares the maxSessionQueries contract key (pre-2.6.0 runtimes
+// silently strip it after the SDK 3.1.0 rename). Pinned tags below the floor
+// and unassumed :latest images must refuse deployment instead of silently
+// degrading.
 func TestAgentService_Create_RuntimeImageGate(t *testing.T) {
 	cases := []struct {
 		name         string
 		image        string
 		assumeLatest bool
+		declaresCap  bool
 		wantErr      bool
 	}{
-		{"pinned 2.4.0 ok", "open-agent-runtime:v2.4.0", false, false},
-		{"pinned 2.5.1 ok with registry prefix", "swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.5.1", false, false},
-		{"pinned 2.3.1 rejected", "open-agent-runtime:v2.3.1", false, true},
-		{"latest rejected without assume", "open-agent-runtime:latest", false, true},
-		{"latest allowed with assume", "open-agent-runtime:latest", true, false},
-		{"untagged treated as latest", "open-agent-runtime", false, true},
+		{"pinned 2.4.0 ok", "open-agent-runtime:v2.4.0", false, false, false},
+		{"pinned 2.5.1 ok with registry prefix", "swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.5.1", false, false, false},
+		{"pinned 2.3.1 rejected", "open-agent-runtime:v2.3.1", false, false, true},
+		{"latest rejected without assume", "open-agent-runtime:latest", false, false, true},
+		{"latest allowed with assume", "open-agent-runtime:latest", true, false, false},
+		{"untagged treated as latest", "open-agent-runtime", false, false, true},
+		{"v2.5.0 rejects declared session cap", "open-agent-runtime:v2.5.0", false, true, true},
+		{"v2.6.0 accepts declared session cap", "open-agent-runtime:v2.6.0", false, true, false},
+		{"latest with assume accepts declared session cap", "open-agent-runtime:latest", true, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1217,6 +1224,10 @@ func TestAgentService_Create_RuntimeImageGate(t *testing.T) {
 			svc.Config().RuntimeImageAssumeLatest = tc.assumeLatest
 
 			req := validRequest()
+			if tc.declaresCap {
+				queries := 50
+				req.Agents[0].MaxSessionQueries = &queries
+			}
 			_, _, err := svc.Create(context.Background(), req)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrRuntimeIncompatible)
