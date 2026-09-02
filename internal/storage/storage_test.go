@@ -1317,3 +1317,118 @@ func TestReadAgentYAML_CorruptManifestFailsExplicitly(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "deploy-manifest")
 }
+
+// TestWriteAgentYAML_ArtifactFreeRedeployRemovesStaleManifest guards the
+// review finding: a redeploy whose graph declares NO artifacts must delete
+// the previous manifest — otherwise ReadAgentYAML would resurrect the removed
+// Skills/CustomTools into the new deployment.
+func TestWriteAgentYAML_ArtifactFreeRedeployRemovesStaleManifest(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	withArtifacts := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "s", Subagents: []string{"child-a"}},
+		{
+			Name: "child-a", Description: "c", SettingSources: []string{"user"},
+			Skills:      []model.SkillSource{{Name: "old-skill", URL: "https://example.com/o.zip", Hash: strings.Repeat("a", 64)}},
+			CustomTools: []model.ToolSource{{Name: "old-tool", URL: "https://example.com/o.mjs", Hash: strings.Repeat("b", 64), FileName: "o.mjs"}},
+		},
+	}
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+	require.NoError(t, store.WriteAgentYAML("parent", withArtifacts, provider, nil, nil, nil))
+	assert.FileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
+
+	// Redeploy the same root with every artifact removed.
+	withoutArtifacts := []model.AgentDefinition{
+		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2", Subagents: []string{"child-a"}},
+		{Name: "child-a", Description: "c2"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", withoutArtifacts, provider, nil, nil, nil))
+
+	// The stale manifest is gone AND read-back reports no capabilities.
+	assert.NoFileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
+	graph, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	for _, a := range graph.Agents {
+		assert.Empty(t, a.Skills, "agent %s must not resurrect removed skills", a.Name)
+		assert.Empty(t, a.CustomTools, "agent %s must not resurrect removed tools", a.Name)
+	}
+}
+
+// TestWriteAgentYAML_RedeployReplacesManifestContent keeps a redeploy with
+// DIFFERENT artifacts from merging stale and fresh declarations.
+func TestWriteAgentYAML_RedeployReplacesManifestContent(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+
+	first := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "s"},
+		{Name: "child-a", Description: "c", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "skill-one", URL: "https://example.com/1.zip", Hash: strings.Repeat("a", 64)}}},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+
+	second := []model.AgentDefinition{
+		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2"},
+		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "skill-two", URL: "https://example.com/2.zip", Hash: strings.Repeat("c", 64)}}},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", second, provider, nil, nil, nil))
+
+	graph, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 2)
+	var child *model.AgentDefinition
+	for i := range graph.Agents {
+		if graph.Agents[i].Name == "child-a" {
+			child = &graph.Agents[i]
+		}
+	}
+	require.NotNil(t, child)
+	require.Len(t, child.Skills, 1)
+	assert.Equal(t, "skill-two", child.Skills[0].Name, "redeploy must replace, not merge, artifact declarations")
+}
+
+// TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment guards the
+// write ordering (manifest first, agents.yaml second): when the manifest
+// cannot be replaced, the previous deployment stays fully intact instead of
+// ending up with a new YAML paired with a stale manifest.
+func TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+
+	first := []model.AgentDefinition{
+		{Name: "parent", Description: "first", Model: "m", SystemPrompt: "s"},
+		{Name: "child-a", Description: "c", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "skill-one", URL: "https://example.com/1.zip", Hash: strings.Repeat("a", 64)}}},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+
+	// Block BOTH the manifest replacement and the YAML replacement: a
+	// directory squatting on deploy-manifest.json makes the staged rename
+	// fail before agents.yaml is touched.
+	require.NoError(t, os.Remove(filepath.Join(dir, "parent", "agents", "deploy-manifest.json")))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "parent", "agents", "deploy-manifest.json"), 0755))
+
+	// The redeploy still DECLARES an artifact, so the manifest must be
+	// replaced (tmp + rename) — the rename onto the squatted directory fails.
+	second := []model.AgentDefinition{
+		{Name: "parent", Description: "second", Model: "m", SystemPrompt: "s2"},
+		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "skill-two", URL: "https://example.com/2.zip", Hash: strings.Repeat("c", 64)}}},
+	}
+	err := store.WriteAgentYAML("parent", second, provider, nil, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deploy-manifest")
+
+	// The previous deployment is untouched: agents.yaml still describes the
+	// first graph. (Assert on the file directly — the squatted directory is
+	// deliberate disk corruption, under which read-back is expected to fail
+	// explicitly, a semantic covered by the corrupt-manifest test above.)
+	yamlBytes, rerr := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, rerr)
+	assert.Contains(t, string(yamlBytes), "first",
+		"manifest write failure must not touch the previous agents.yaml")
+}

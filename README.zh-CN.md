@@ -263,10 +263,11 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agent-deployer ./cmd/server
 # 默认跳过，仅在 integration 构建标签下运行。
 go test -tags=integration ./tests/integration/... -v -timeout 5m
 
-# 真实 runtime 验收测试（通过运行中 runtime 的 agent detail API 断言能力隔离）
-# 额外需要真实 v2.4.0+ 镜像（如 ECS 宿主机上），否则自动 skip：
+# 真实 runtime 验收测试（agent detail API 能力隔离断言 + 确定性 mock
+# provider/MCP fixture 驱动的 parent → Task(child) 执行链路）额外需要真实
+# v2.4.0+ 镜像（如 ECS 宿主机上），否则自动 skip：
 CAM_INTEGRATION_REAL_RUNTIME_IMAGE=swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.4.0 \
-  go test -tags=integration ./tests/integration/... -run TestIntegration_AgentGraphRuntimeIsolation -v
+  go test -tags=integration ./tests/integration/... -run "TestIntegration_AgentGraphRuntimeIsolation|TestIntegration_AgentGraphTaskExecution" -v
 ```
 
 ## 项目结构

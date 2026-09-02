@@ -264,11 +264,12 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agent-deployer ./cmd/server
 # locally. They are skipped by default and only run with the integration tag.
 go test -tags=integration ./tests/integration/... -v -timeout 5m
 
-# The real-runtime acceptance test (capability isolation via the running
-# runtime's agent detail API) additionally needs a GENUINE v2.4.0+ image,
-# e.g. on the ECS host. It skips itself otherwise:
+# The real-runtime acceptance tests (capability isolation via the agent
+# detail API, and parent → Task(child) execution with deterministic mock
+# provider/MCP fixtures) additionally need a GENUINE v2.4.0+ image, e.g. on
+# the ECS host. They skip themselves otherwise:
 CAM_INTEGRATION_REAL_RUNTIME_IMAGE=swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.4.0 \
-  go test -tags=integration ./tests/integration/... -run TestIntegration_AgentGraphRuntimeIsolation -v
+  go test -tags=integration ./tests/integration/... -run "TestIntegration_AgentGraphRuntimeIsolation|TestIntegration_AgentGraphTaskExecution" -v
 ```
 
 ## Project layout

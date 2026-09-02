@@ -26,6 +26,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -560,7 +562,10 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
 	baseURL := fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort)
-	authHeader := fmt.Sprintf("Bearer %s", "it-runtime-token")
+	// Runtime v2.4.0 authenticates /v1/* via the x-api-key header (see
+	// runtime src/auth.ts) — NOT Authorization: Bearer. A 401 here means
+	// protocol drift between deployer tests and runtime auth.
+	const runtimeToken = "it-runtime-token"
 
 	// Wait for the runtime to come up (schema errors crash it; a healthy
 	// runtime proves v2.4.0+ accepted the complete graph).
@@ -585,7 +590,7 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 		t.Helper()
 		req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/"+id, nil)
 		require.NoError(t, rerr)
-		req.Header.Set("Authorization", authHeader)
+		req.Header.Set("x-api-key", runtimeToken)
 		resp, rerr := client.Do(req)
 		require.NoError(t, rerr)
 		defer resp.Body.Close()
@@ -649,4 +654,393 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	assert.NotContains(t, childBDetail, "mcpServers")
 	assert.NotContains(t, childBDetail, "allowedTools")
 	assert.NotContains(t, childBDetail, "extraUserSkillDirs")
+}
+
+// capturedLLMRequest records what the SDK's provider sent to the mock LLM.
+type capturedLLMRequest struct {
+	System string   // messages[0].content
+	Tools  []string // function names from body.tools
+	Model  string
+	Raw    []byte
+}
+
+// TestIntegration_AgentGraphTaskExecution is the execution-path acceptance
+// test for issue #16 (third review round): it drives a REAL runtime through
+// parent → Task(child-a) with deterministic fixtures — a mock
+// openai-completions provider and a mock streamable-http MCP server — and
+// asserts the child's own MCP / custom tools / skills / datasets / allow+deny
+// policy actually take effect in the execution path, with no parent fallback.
+//
+// Gated on CAM_INTEGRATION_REAL_RUNTIME_IMAGE (genuine runtime v2.4.0+); it
+// self-skips where no real image exists.
+func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
+	realImage := os.Getenv("CAM_INTEGRATION_REAL_RUNTIME_IMAGE")
+	if realImage == "" {
+		t.Skip("set CAM_INTEGRATION_REAL_RUNTIME_IMAGE to a real open-agent-runtime v2.4.0+ image to run this test")
+	}
+	requireDocker(t)
+
+	var mu sync.Mutex
+	parentTurns, childTurns := 0, 0
+	var parentReqs, childReqs []capturedLLMRequest
+
+	// ---- Mock LLM (openai-completions protocol) -------------------------
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		require.NoError(t, json.Unmarshal(body, &req))
+
+		captured := capturedLLMRequest{Model: req.Model, Raw: body}
+		if len(req.Messages) > 0 && req.Messages[0].Role == "system" {
+			var s string
+			_ = json.Unmarshal(req.Messages[0].Content, &s)
+			captured.System = s
+		}
+		for _, tl := range req.Tools {
+			captured.Tools = append(captured.Tools, tl.Function.Name)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		isChild := strings.Contains(captured.System, "research specialist")
+		if isChild {
+			childReqs = append(childReqs, captured)
+			childTurns++
+		} else {
+			parentReqs = append(parentReqs, captured)
+			parentTurns++
+		}
+
+		toolCall := func(id, name, args string) map[string]any {
+			return map[string]any{
+				"choices": []any{map[string]any{
+					"finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []any{map[string]any{
+							"id":   id,
+							"type": "function",
+							"function": map[string]any{
+								"name":      name,
+								"arguments": args,
+							},
+						}},
+					},
+				}},
+			}
+		}
+		final := func(text string) map[string]any {
+			return map[string]any{
+				"choices": []any{map[string]any{
+					"finish_reason": "stop",
+					"message":       map[string]any{"role": "assistant", "content": text},
+				}},
+			}
+		}
+
+		var resp map[string]any
+		switch {
+		case isChild && childTurns == 1:
+			// Ask for BOTH the file tool and the MCP tool in one turn.
+			resp = map[string]any{
+				"choices": []any{map[string]any{
+					"finish_reason": "tool_calls",
+					"message": map[string]any{
+						"role": "assistant",
+						"tool_calls": []any{
+							map[string]any{"id": "call-file", "type": "function",
+								"function": map[string]any{"name": "child-tool", "arguments": "{}"}},
+							map[string]any{"id": "call-mcp", "type": "function",
+								"function": map[string]any{"name": "mcp__knowledge__lookup", "arguments": "{}"}},
+						},
+					},
+				}},
+			}
+		case isChild:
+			resp = final("child-a-done")
+		case parentTurns == 1:
+			resp = toolCall("call-task", "Task", `{"prompt":"do the research","description":"research","subagent_type":"General","subagent_name":"child-a"}`)
+		default:
+			resp = final("parent-final")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(llmSrv.Close)
+
+	// ---- Mock MCP (streamable-http JSON-RPC) ----------------------------
+	mcpCalls := 0
+	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		var rpc struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			Result json.RawMessage `json:"result"`
+		}
+		require.NoError(t, json.Unmarshal(body, &rpc))
+		w.Header().Set("Content-Type", "application/json")
+
+		switch rpc.Method {
+		case "initialize":
+			var p struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			_ = json.Unmarshal(rpc.Params, &p)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      rpc.ID,
+				"result": map[string]any{
+					"protocolVersion": p.ProtocolVersion,
+					"capabilities":    map[string]any{"tools": map[string]any{}},
+					"serverInfo":      map[string]any{"name": "mock-mcp", "version": "1.0"},
+				},
+			})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      rpc.ID,
+				"result": map[string]any{
+					"tools": []any{map[string]any{
+						"name":        "lookup",
+						"description": "Deterministic mock lookup",
+						"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+					}},
+				},
+			})
+		case "tools/call":
+			mu.Lock()
+			mcpCalls++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      rpc.ID,
+				"result": map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": "mcp-lookup-ok"}},
+					"isError": false,
+				},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": rpc.ID,
+				"error": map[string]any{"code": -32601, "message": "unknown method"},
+			})
+		}
+	}))
+	t.Cleanup(mcpSrv.Close)
+
+	// ---- Deploy the graph ------------------------------------------------
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:                  dir,
+		Port:                     18080,
+		RuntimeImage:             realImage,
+		RuntimeContainerPort:     3000,
+		RuntimeImageAssumeLatest: true,
+	}
+	dc := requireDocker(t)
+	t.Cleanup(func() { _ = dc.Close() })
+	svc := service.NewAgentService(cfg, dc)
+	h := handler.NewAgentHandler(svc)
+	router := gin.New()
+	h.Register(router.Group("/api/v1"))
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(ctx, "parent", true)
+	})
+
+	// Skill zip with a distinctive, assertable marker line.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	f, err := zw.Create("SKILL.md")
+	require.NoError(t, err)
+	_, err = f.Write([]byte("# iso-skill marker\n"))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	zipBytes := zipBuf.Bytes()
+	sum := sha256.Sum256(zipBytes)
+	zipHash := hex.EncodeToString(sum[:])
+
+	// File tool: zod schema + deterministic execute result.
+	toolSrc := `import { z } from "zod"
+export default {
+  name: "child-tool",
+  description: "Deterministic file tool",
+  inputSchema: z.object({}),
+  execute: async () => "file-tool-ok",
+}
+`
+	toolSum := sha256.Sum256([]byte(toolSrc))
+	toolHash := hex.EncodeToString(toolSum[:])
+	mux := http.NewServeMux()
+	mux.HandleFunc("/skill.zip", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(zipBytes) })
+	mux.HandleFunc("/child-tool.mjs", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(toolSrc)) })
+	artifacts := httptest.NewServer(mux)
+	t.Cleanup(artifacts.Close)
+
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID: "parent",
+		Agents: []model.AgentDefinition{
+			{
+				Name: "parent", Description: "Coordinates",
+				Model: "mock-model", SystemPrompt: "You are the parent coordinator. Delegate the research task.",
+				Tools: []string{"Task"}, Subagents: []string{"child-a", "child-b"},
+			},
+			{
+				Name: "child-a", Description: "Research", SystemPrompt: "You are the research specialist.",
+				Tools: []string{"WebSearch"}, DisallowedTools: []string{"Bash"},
+				SettingSources: []string{"user"},
+				Skills:         []model.SkillSource{{Name: "iso-skill", URL: artifacts.URL + "/skill.zip", Hash: zipHash}},
+				CustomTools:    []model.ToolSource{{Name: "child-tool", URL: artifacts.URL + "/child-tool.mjs", Hash: toolHash, FileName: "child-tool.mjs"}},
+				Datasets:       map[string]string{"knowledge-a": "The secret dataset for research"},
+				McpServers: map[string]model.McpServerConfig{
+					"knowledge": {Type: "http", URL: mcpSrv.URL + "/mcp"},
+				},
+			},
+			{Name: "child-b", Description: "Review", SystemPrompt: "Review"},
+		},
+		Provider:     model.ProviderConfig{Protocol: "openai-completions", BaseURL: llmSrv.URL, APIKey: "mock-key"},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, router, http.MethodPost, "/api/v1/agents", body)
+	if !assert.Equal(t, http.StatusCreated, w.Code, "graph deploy: %s", w.Body.String()) {
+		return
+	}
+	var createResp struct {
+		Data model.AgentResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
+	baseURL := fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort)
+	const runtimeToken = "it-runtime-token"
+
+	// Wait until every entry is ready: child-a's materialization includes a
+	// real MCP handshake against the mock server.
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		allReady := true
+		for _, id := range []string{"parent", "child-a", "child-b"} {
+			req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/"+id, nil)
+			require.NoError(t, rerr)
+			req.Header.Set("x-api-key", runtimeToken)
+			resp, rerr := client.Do(req)
+			if rerr == nil {
+				db, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				var detail struct {
+					Status            string `json:"status"`
+					UnavailableReason string `json:"unavailableReason"`
+				}
+				_ = json.Unmarshal(db, &detail)
+				if detail.Status != "ready" {
+					allReady = false
+					if time.Now().After(deadline) {
+						t.Fatalf("agent %s not ready (%s: %s): %s", id, detail.Status, detail.UnavailableReason, string(db))
+					}
+				}
+			} else {
+				allReady = false
+				if time.Now().After(deadline) {
+					t.Fatalf("runtime never came up: %v", rerr)
+				}
+			}
+		}
+		if allReady {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Drive the execution path: parent run → Task(child-a) → child tools.
+	runBody := `{"message":"start the research","stream":false}`
+	runReq, rerr := http.NewRequest(http.MethodPost, baseURL+"/v1/agents/parent/runs", strings.NewReader(runBody))
+	require.NoError(t, rerr)
+	runReq.Header.Set("Content-Type", "application/json")
+	runReq.Header.Set("x-api-key", runtimeToken)
+	runClient := &http.Client{Timeout: 180 * time.Second}
+	runResp, rerr := runClient.Do(runReq)
+	require.NoError(t, rerr)
+	defer runResp.Body.Close()
+	runBytes, rerr := io.ReadAll(runResp.Body)
+	require.NoError(t, rerr)
+	require.Equal(t, http.StatusOK, runResp.StatusCode, "run response: %s", string(runBytes))
+	var run struct {
+		State string `json:"state"`
+		Text  string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal(runBytes, &run))
+	assert.Equal(t, "completed", run.State, "run body: %s", string(runBytes))
+	assert.Equal(t, "parent-final", run.Text)
+
+	// ---- Assertions on the execution path --------------------------------
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, childReqs, "child-a must actually have been executed via Task")
+	require.NotEmpty(t, parentReqs, "parent must have been executed")
+
+	// Child-a system prompt carries ITS OWN prompt + datasets + skill — and
+	// nothing from the parent.
+	child1 := childReqs[0]
+	assert.Contains(t, child1.System, "research specialist")
+	assert.Contains(t, child1.System, "knowledge-a", "child datasets must be injected")
+	assert.Contains(t, child1.System, "iso-skill marker", "child skills must be visible in the prompt")
+	assert.NotContains(t, child1.System, "parent coordinator")
+
+	// Child-a tool boundary: own file tool + own MCP tool + allowed tool;
+	// disallowed Bash and the parent's Task mount are absent.
+	childTools := strings.Join(child1.Tools, ",")
+	assert.Contains(t, childTools, "child-tool", "fileTools must be mounted for child-a")
+	assert.Contains(t, childTools, "mcp__knowledge__lookup", "child MCP tools must be mounted")
+	assert.Contains(t, childTools, "WebSearch")
+	assert.NotContains(t, childTools, "Bash", "disallowedTools must be enforced")
+	assert.NotContains(t, childTools, "Task", "child mounts nothing")
+
+	// Runtime-global model is reused by the mounted child (no child override).
+	assert.Equal(t, "mock-model", child1.Model)
+
+	// The tools actually EXECUTED: second child turn carries both results.
+	require.GreaterOrEqual(t, len(childReqs), 2, "child-a must run a second turn after tool results")
+	secondRaw := string(childReqs[1].Raw)
+	assert.Contains(t, secondRaw, "file-tool-ok", "file tool must have executed")
+	assert.Contains(t, secondRaw, "mcp-lookup-ok", "MCP tool must have executed")
+	assert.Equal(t, 1, mcpCalls, "mock MCP must have received exactly one tools/call")
+
+	// Parent boundary: Task mounted; none of the child's capabilities leak up.
+	parent1 := parentReqs[0]
+	assert.Contains(t, parent1.System, "parent coordinator")
+	assert.NotContains(t, parent1.System, "knowledge-a")
+	assert.NotContains(t, parent1.System, "iso-skill marker")
+	parentTools := strings.Join(parent1.Tools, ",")
+	assert.Contains(t, parentTools, "Task")
+	assert.NotContains(t, parentTools, "child-tool")
+	assert.NotContains(t, parentTools, "mcp__knowledge__lookup")
+	assert.Equal(t, "mock-model", parent1.Model)
 }

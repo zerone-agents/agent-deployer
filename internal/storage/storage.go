@@ -206,13 +206,23 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("create agent directory: %w", err)
 	}
 
-	filePath := filepath.Join(agentDir, "agents.yaml")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
-		return fmt.Errorf("write agent YAML: %w", err)
-	}
-
+	// Write order (review finding): manifest FIRST, agents.yaml second — both
+	// via staged tmp + atomic rename. A crash between the two leaves a NEW
+	// manifest next to the OLD YAML; read-back is driven by the YAML graph,
+	// and manifest entries for absent agent ids are ignored, so the window
+	// degrades safely. The reverse order (new YAML + stale manifest) would
+	// resurrect removed capabilities, and a manifest write failure must leave
+	// the previous deployment fully intact.
 	if err := writeDeploymentManifest(agentDir, rootName, agents); err != nil {
 		return err
+	}
+
+	yamlTmp := filepath.Join(agentDir, "agents.yaml.tmp")
+	if err := os.WriteFile(yamlTmp, data, 0644); err != nil {
+		return fmt.Errorf("write agent YAML: %w", err)
+	}
+	if err := os.Rename(yamlTmp, filepath.Join(agentDir, "agents.yaml")); err != nil {
+		return fmt.Errorf("replace agent YAML: %w", err)
 	}
 
 	return nil
@@ -233,9 +243,12 @@ type agentArtifacts struct {
 }
 
 // writeDeploymentManifest stores the per-agent artifact declarations next to
-// agents.yaml. Artifact-free deployments write nothing, keeping the directory
-// clean; ReadAgentYAML treats a missing manifest as "no artifacts declared".
+// agents.yaml (staged tmp + atomic rename). An artifact-FREE graph REMOVES a
+// previous manifest — otherwise ReadAgentYAML would resurrect the removed
+// capabilities into the new deployment.
 func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefinition) error {
+	manifestPath := filepath.Join(agentDir, "deploy-manifest.json")
+
 	m := deploymentManifest{RootAgentID: rootName, Artifacts: make(map[string]agentArtifacts, len(agents))}
 	for _, a := range agents {
 		if len(a.Skills) == 0 && len(a.CustomTools) == 0 {
@@ -244,14 +257,21 @@ func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefi
 		m.Artifacts[a.Name] = agentArtifacts{Skills: a.Skills, CustomTools: a.CustomTools}
 	}
 	if len(m.Artifacts) == 0 {
+		if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale deploy manifest: %w", err)
+		}
 		return nil
 	}
 	data, err := json.Marshal(&m)
 	if err != nil {
 		return fmt.Errorf("marshal deploy manifest: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json"), data, 0644); err != nil {
-		return fmt.Errorf("write deploy manifest: %w", err)
+	tmp := manifestPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("write deploy-manifest: %w", err)
+	}
+	if err := os.Rename(tmp, manifestPath); err != nil {
+		return fmt.Errorf("replace deploy-manifest: %w", err)
 	}
 	return nil
 }
