@@ -77,12 +77,15 @@ All endpoints share a common response envelope:
 
 | Status | Meaning | Triggered by |
 |---|---|---|
-| 200 | Success | All queries; successful stop / restart / delete |
+| 200 | Success | All queries; successful stop / restart / delete; idempotent create returning an existing container unchanged |
 | 201 | Created | `POST /agents` successfully created a new container |
-| 400 | Bad request | Request body cannot be parsed or required fields are missing |
+| 400 | Bad request | Body cannot be parsed, required fields are missing, graph validation fails, or the request uses the removed legacy inline shape (`"agent"` field) |
 | 401 | Unauthorized | Missing or incorrect API Key |
-| 404 | Not found | No agent container exists with the given `name` |
+| 404 | Not found | No agent container exists with the given `name` (and no on-disk data remains) |
+| 422 | Unprocessable entity | Declared skill/tool hash mismatch or artifact violates size constraints |
 | 500 | Server error | Docker call failure, disk write failure, etc. |
+| 502 | Bad gateway | Skill/tool download upstream failure (non-2xx, network error, timeout) |
+| 503 | Service unavailable | Runtime image cannot run the graph protocol: pin `AGENT_DEPLOYER_RUNTIME_IMAGE` to a v2.4.0+ tag, or set `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` for a verified `:latest` |
 
 ---
 
@@ -97,9 +100,12 @@ export API_KEY=<your key>   # can be omitted when authentication is disabled
 
 ### 1. Create Agent
 
-Creates and starts an agent runtime container. **Agent names are unique (singleton)**; the container name is sanitized and lowercased to `[a-z0-9-]`, serving as the unique identifier across the system. Custom tools declared in `agent.customTools` are downloaded and hash-verified before the container is created; any install failure aborts the request without starting a container.
+Creates and starts an agent runtime container from a **complete agent graph** (issue #16): `rootAgentId` names the container's entry agent, and `agents` carries the full Agent-local definition of every agent in the deployment closure. `subagents` are pure id references — mounted agents never inherit, merge, or fall back to parent capabilities; an empty field stays empty. The deployment name is the `rootAgentId` itself (it must already be in sanitized form: lowercase alphanumeric and hyphens). Custom tools and skills declared anywhere in the graph are downloaded and hash-verified before the container is created; any install failure aborts the request without starting a container.
 
-- **Idempotency**: if a container with the same name already exists and `force=false` (default), the existing container is returned directly (200 semantics, though the actual status code remains 201); with `force=true`, the old container is stopped + deleted first, then rebuilt with the new configuration (session data is preserved).
+> **Breaking change (deployer v3.0.0)**: the legacy inline shape (`"agent": {...}` with `subagents` as five-field stubs) is rejected with an explicit 400 diagnostic. See [Migration from the inline protocol](#migration-from-the-inline-protocol).
+
+- **Idempotency**: if a container with the same name already exists and `force=false` (default), the existing container is returned unchanged with 200; with `force=true`, the old container is stopped + deleted first, then rebuilt with the new configuration (session data is preserved).
+- **Runtime image floor**: the graph protocol requires runtime **v2.4.0+**. The deployer refuses deployment (503) unless `AGENT_DEPLOYER_RUNTIME_IMAGE` pins a v2.4.0+ tag, or `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` is set for a `:latest` image — a complete agent graph is never silently handed to an old runtime.
 - **Method**: `POST /agents`
 - **Content-Type**: `application/json`
 
@@ -107,8 +113,9 @@ Creates and starts an agent runtime container. **Agent names are unique (singlet
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `agent` | object | Yes | Agent configuration, see [AgentDefinition](#agentdefinition) |
-| `provider` | object | Yes | LLM provider configuration, see [ProviderConfig](#providerconfig) |
+| `rootAgentId` | string | Yes | Id of the container's entry agent. Doubles as the deployment name: must already match `[a-z0-9-]` (sanitized form), and a definition with this id must exist in `agents` |
+| `agents` | AgentDefinition[] | Yes | The complete deployment closure: one full Agent-local definition per agent, including the root. Every `subagents` reference must resolve to exactly one entry in this list |
+| `provider` | object | Yes | Runtime-global LLM provider configuration (written to the root entry only), see [ProviderConfig](#providerconfig) |
 | `aigc` | object | No | AIGC content labeling configuration (GB 45438-2025), see [AigcConfig](#aigcconfig). When omitted or `enabled=false`, the runtime does not add labels |
 | `hub` | object | No | Agent-hub chat record push configuration, see [HubConfig](#hubconfig). When omitted or `enabled=false`, the runtime does not push chat records |
 | `force` | boolean | No | Defaults to `false`. When `true`, forces rebuilding a container with the same name |
@@ -121,29 +128,33 @@ curl -X POST "$DEPLOYER/agents" \
   -H 'Content-Type: application/json' \
   ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
   -d '{
-    "agent": {
-      "name": "coder",
-      "description": "Writes and edits code",
-      "model": "claude-sonnet-4-6",
-      "systemPrompt": "You are a coding assistant.",
-      "maxTurns": null,
-      "permissionMode": "auto",
-      "tools": ["Read", "Write", "Edit", "Bash"],
-      "skills": ["code-review"],
-      "datasets": {
-        "dataset-1": "Primary dataset for code generation",
-        "dataset-2": "Secondary dataset for testing"
+    "rootAgentId": "coder",
+    "agents": [
+      {
+        "name": "coder",
+        "description": "Writes and edits code",
+        "model": "claude-sonnet-4-6",
+        "systemPrompt": "You are a coding assistant.",
+        "maxTurns": null,
+        "permissionMode": "auto",
+        "tools": ["Task"],
+        "subagents": ["reviewer"]
       },
-      "subagents": [
-        {
-          "name": "reviewer",
-          "description": "Reviews code",
-          "prompt": "You are a code reviewer.",
-          "tools": ["Read"],
-          "maxTurns": 10
+      {
+        "name": "reviewer",
+        "description": "Reviews code",
+        "systemPrompt": "You are a code reviewer.",
+        "tools": ["Read"],
+        "disallowedTools": ["Bash"],
+        "settingSources": ["user"],
+        "skills": [
+          {"name": "code-review", "url": "https://example.com/code-review.zip", "hash": "<sha256>"}
+        ],
+        "datasets": {
+          "dataset-1": "Primary dataset for code review"
         }
-      ]
-    },
+      }
+    ],
     "provider": {
       "protocol": "anthropic-messages",
       "baseUrl": "https://api.anthropic.com",
@@ -169,7 +180,8 @@ curl -X POST "$DEPLOYER/agents" \
     "createdAt": "2026-06-25T10:00:00Z",
     "yamlPath": "/var/lib/agent-deployer/coder/agents/agents.yaml",
     "sessionDir": "/var/lib/agent-deployer/coder/sessions",
-    "skillsDir": "/var/lib/agent-deployer/coder/skills",
+    "skillsDir": "/var/lib/agent-deployer/coder/agents/skills",
+    "containerSkillsDir": "/app/config/skills",
     "runtimeToken": "caller-provided-runtime-token"
   }
 }
@@ -179,16 +191,17 @@ curl -X POST "$DEPLOYER/agents" \
 
 | Field | Type | Description |
 |---|---|---|
-| `agentName` | string | Sanitized agent name (unique key) |
+| `agentName` | string | Deployment name (= rootAgentId, unique key) |
 | `instanceId` | string | Short random ID generated at creation time, attached to the Docker label `agent-deployer/agent.instance-id`, reserved for future HA scenarios |
 | `containerId` | string | Full Docker container ID |
 | `containerName` | string | Docker container name, of the form `cloud-agent-<name>-<instanceId>` |
 | `status` | string | Status enum, see [AgentStatus](#agentstatus) |
 | `hostPort` | int | Port mapped to the host (the runtime's internal container port is fixed, controlled by `AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT`, default 3000) |
 | `createdAt` | string | RFC3339 UTC timestamp |
-| `yamlPath` | string | Path to this agent's YAML configuration (mounted into the container at `/app/config`) |
+| `yamlPath` | string | Path to the complete agent graph YAML (mounted into the container at `/app/config`) |
 | `sessionDir` | string | Session persistence directory (mounted into the container at `/root/.agents`) |
-| `skillsDir` | string | Skills directory (returned only when skills are declared, copied into `/workdir/.agents/skills`) |
+| `skillsDir` | string | Host-side root of the per-agent skill directories (returned only when any agent in the graph declares skills). Skills reach the container through the `/app/config` bind mount — there is no docker cp anymore |
+| `containerSkillsDir` | string | In-container counterpart of `skillsDir` (`/app/config/skills`); each agent's YAML entry declares its own subdirectory via `extraUserSkillDirs` |
 
 > **Note**: the returned `hostPort` is stable only for the lifetime of the container. The port changes after a container rebuild, so always query it again each time.
 
@@ -409,29 +422,45 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 ```jsonc
 {
-  "agent": AgentDefinition,
-  "provider": ProviderConfig,
-  "force": false,                  // boolean
-  "runtime_token": "must-be-set"   // string, required, used as the runtime token
+  "rootAgentId": "coder",          // string, required; entry agent id == deployment name
+  "agents": [ /* AgentDefinition[] */ ],
+  "provider": ProviderConfig,       // runtime-global; written to the root entry only
+  "force": false,                   // boolean
+  "runtime_token": "must-be-set"    // string, required, used as the runtime token
 }
 ```
 
+Graph-level validation (all failures return 400 with an explicit diagnostic):
+
+- `rootAgentId` is required, must match `[a-z0-9-]` (already sanitized), and must have a definition in `agents`.
+- Agent ids are unique across the graph (`duplicate agent id`).
+- Every `subagents` reference must exist (`references unknown subagent`), must not repeat (`duplicates subagent reference`), and must not point at itself (`references itself`).
+- Cycles are rejected outright (`subagent reference cycle detected`), even though the runtime truncates delegation at depth 1.
+- Runtime-global fields are root-only: a non-root agent declaring `model` / `maxSessionQueries` / `permissionMode` is rejected instead of being silently ignored at mount time.
+- The root requires both `model` and `systemPrompt`.
+- An agent declaring `skills` must include `"user"` in its `settingSources` (per-agent skill directories are scanned at user level).
+- The same tool/skill `name` across agents requires an identical `url`+`hash` declaration (`conflicting declarations`); identical declarations are shared artifacts and download once (tools) / install per agent (skills).
+
 ### AgentDefinition
+
+One full Agent-local definition inside the deployment graph. Every entry — root or mounted — carries its own capabilities; nothing is inherited from, merged with, or fallen back to the parent.
 
 | Field | Type | Required | Validation Rules | Description |
 |---|---|---|---|---|
-| `name` | string | Yes | Non-empty; sanitized to `[a-z0-9-]` | Unique key |
-| `description` | string | Yes | Non-empty | Description of the agent's capabilities. Required as of runtime 2.0; it is what the parent agent's Task tool displays when mounting the subagent |
-| `model` | string | Yes | Non-empty | Model name, e.g. `claude-sonnet-4-6` |
-| `systemPrompt` | string | Yes | Non-empty | System prompt |
-| `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for the agent |
-| `permissionMode` | string | No | — | Permission mode, e.g. `auto` |
-| `tools` | string[] | No | — | Enabled tool names, e.g. `["Read","Write"]`; the complete allow-list of built-in + custom tool names |
-| `customTools` | ToolSource[] | No | See ToolSource definition; duplicate names/local files rejected | List of custom Tool files to download, hash-verify, and install before container creation |
-| `skills` | SkillSource[] | No | See SkillSource definition | List of skill zips to download/install; only the name is kept as a skill whitelist entry when passed to the runtime |
-| `settingSources` | string[] | No | — | Sources that trigger the runtime to scan the skills filesystem (e.g. `["user","project"]`) **; if not provided, skills are not loaded** |
-| `datasets` | map<string,string> | No | Both `id` and `description` must be non-empty; duplicate `id` in JSON keeps only the last one | Mapping of dataset_id to dataset_description, written into the `datasets` field of `agents.yaml` |
-| `subagents` | SubagentDefinition[] | No | Subagent names must be unique | Subagent configurations. Runtime 2.0 uses reference-based mounting: each subagent is expanded into a first-class agent entry in agents.yaml, with the main entry referencing it by id; on mount only `description`/`prompt`/`tools`/`maxTurns` take effect, while the model and credentials follow the main agent |
+| `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}`; unique across the graph | Agent id. The root's name must equal `rootAgentId` in sanitized form |
+| `description` | string | Yes | Non-empty | Description of the agent's capabilities; what the parent agent's Task tool displays when mounting this agent |
+| `model` | string | Root only | Required on the root; forbidden on non-root agents | Runtime-global model name, e.g. `claude-sonnet-4-6`. Mounted agents reuse the root runtime's execution environment |
+| `systemPrompt` | string | Root: yes | Non-empty on the root; optional for mounted agents | System prompt. The deployer externalizes it for readability: staged as `prompts/<id>-<sha16>.md` next to `agents.yaml` (bind-mounted into the container) and referenced via the entry's `systemPromptFile` (runtime v2.4.0+ mutual-exclusion refine, relative to the config dir). Read-back restores the text, so the API shape never changes |
+| `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for this agent (agent-local) |
+| `maxSessionQueries` | int \| null | Root only | — | Runtime-global session-level turn limit. YAML contract key introduced with runtime v2.6.0 (SDK 3.1.0 rename of `maxSessionTurns`); on v2.4.0/v2.5.0 the legacy key name applies, on v2.6.0+ only `maxSessionQueries` is honored |
+| `permissionMode` | string | Root only | — | Runtime-global permission mode, e.g. `auto` |
+| `tools` | string[] | No | — | Agent-local allow-list of tool names |
+| `disallowedTools` | string[] | No | — | Agent-local deny-list of tool names (runtime v2.4.0+). Round-trips losslessly into agents.yaml and read-back |
+| `customTools` | ToolSource[] | No | See ToolSource definition; duplicate names/local files rejected; same name across agents requires identical declaration | Tool files downloaded, hash-verified, and installed into the shared flat `<agentsDir>/tools` directory before container creation; this agent's YAML entry references its own installed paths |
+| `skills` | SkillSource[] | No | See SkillSource definition; requires `"user"` in `settingSources` | Skill zips downloaded and installed per-agent under `<agentsDir>/skills/<agentId>/`; the YAML entry gets `/app/config/skills/<agentId>` injected into `extraUserSkillDirs` (user-level scan). Raw scan paths are NOT part of the deployment API — only the deployer writes `extraUserSkillDirs`, which keeps per-agent skill isolation caller-proof |
+| `settingSources` | string[] | No | — | Sources that trigger the runtime to scan the skills filesystem (`"user"` / `"project"`). Empty stays empty for non-root agents; the root defaults to `["project"]` when unset |
+| `datasets` | map<string,string> | No | Both `id` and `description` must be non-empty | Mapping of dataset_id to dataset_description, written into this agent's `datasets` field in agents.yaml |
+| `subagents` | string[] | No | Must reference existing ids; no duplicates, no self references, no cycles | Pure id references to other entries in the same graph. Delegation depth is fixed at 1: an agent mounted as a subagent does not mount its own `subagents` |
 
 ### SkillSource
 
@@ -454,15 +483,20 @@ Describes a single custom Tool file to download, hash-verify, and install for th
 
 Behavior: files are downloaded (max 5 MiB), stream-hash-verified, and atomically installed under the agent config mount before the replacement container is created. Any tool install failure aborts the request (HTTP 422/502) — no container is started. The runtime derives the tool name from the file's default-exported definition, not the filename. Tools carry full Node.js privileges: only Node built-ins, `@zerone-agent/agent-runtime/tools`, and `zod` are supported; dependencies are not installed.
 
-### SubagentDefinition
+### Migration from the inline protocol
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | Yes | Subagent name, must be unique within the same agent |
-| `description` | string | Yes | Description |
-| `prompt` | string | Yes | Prompt for the subagent |
-| `tools` | string[] | No | Tools enabled for the subagent |
-| `maxTurns` | int | No | Maximum turns for the subagent |
+`SubagentDefinition` (the inline five-field stub: `name`/`description`/`prompt`/`tools`/`maxTurns`) was **removed** in deployer v3.0.0. Requests carrying the legacy `"agent"` field are rejected with 400 and an explicit diagnostic — the legacy shape is never silently reinterpreted, because field loss would silently downgrade child capabilities.
+
+Migration mapping:
+
+| Legacy (inline) | v3.0.0 (complete graph) |
+|---|---|
+| `"agent": { ... }` | `"rootAgentId": "<agent.name>"` + one entry in `"agents"` carrying the same object (name must equal rootAgentId) |
+| `agent.subagents[i]` stub | A full `AgentDefinition` in `agents` with `name` = stub name; `prompt` → `systemPrompt`; add `description` (was already required) |
+| Parent's `subagents` stub array | `subagents: ["<stub1-name>", "<stub2-name>"]` (pure id references) |
+| (not expressible before) | Child `mcpServers` / `customTools` / `skills` / `settingSources` / `datasets` / `disallowedTools` / `maxTurns` — each child now owns its full Agent-local profile |
+
+Note: child `model` / `maxSessionQueries` / `permissionMode` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
 
 ### ProviderConfig
 
@@ -538,10 +572,11 @@ The data structure returned by `POST /agents`, `GET /agents/:name`, and `GET /ag
 | `status` | AgentStatus | Yes | |
 | `hostPort` | int | Yes | |
 | `createdAt` | string | `POST` only | RFC3339 UTC |
-| `yamlPath` | string | `POST` only | |
+| `yamlPath` | string | `POST` only | Path to the complete agent graph YAML |
 | `sessionDir` | string | `POST` only | |
-| `skillsDir` | string | `POST` only, and only when skills are declared | |
-| `toolsDir` | string | `POST` only, and only when custom tools are declared | |
+| `skillsDir` | string | `POST` only, and only when any agent in the graph declares skills | Host-side root of per-agent skill directories (`<dataDir>/<name>/agents/skills`) |
+| `containerSkillsDir` | string | `POST` only, together with `skillsDir` | In-container root (`/app/config/skills`); skills reach the runtime via the `/app/config` bind mount |
+| `toolsDir` | string | `POST` only, and only when custom tools are declared | Host-side shared flat tool directory (`<dataDir>/<name>/agents/tools`) |
 | `runtimeToken` | string | `POST` only | Token provided by the caller, identical to the `ZERONE_AGENT_HTTP_API_KEY` injected into the container; not returned by Get / List |
 
 ### AgentStatus
@@ -562,7 +597,7 @@ Status enum (string):
 
 ## Provider Field Mapping
 
-At creation time, `provider` credentials are written into the main agent entry of the runtime `agents.yaml` (not into environment variables):
+At creation time, `provider` credentials and the root's `model` are written into the **root entry only** of the runtime `agents.yaml` (not into environment variables). These are runtime-global fields: mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment, and never receive their own copy:
 
 | Request Field | agents.yaml Field | Description |
 |---|---|---|
@@ -583,7 +618,7 @@ A complete "create → wait for readiness → use → destroy" workflow:
 RESP=$(curl -s -X POST "$DEPLOYER/agents" \
   -H 'Content-Type: application/json' \
   ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
-  -d '{ "agent": { ... }, "provider": { ... } }')
+  -d '{ "rootAgentId": "coder", "agents": [ { "name": "coder", "description": "...", "model": "...", "systemPrompt": "..." } ], "provider": { ... }, "runtime_token": "..." }')
 
 # 2. Poll health status until healthy
 while :; do
@@ -615,10 +650,12 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 | Symptom | What to Check |
 |---|---|
-| Create returns 400 `invalid request` | Check that `agent.name/model/systemPrompt` and `provider.protocol/baseUrl/lockedApiKey` are all present; `protocol` must be `anthropic-messages` or `openai-completions` |
+| Create returns 400 `invalid request` | Check `rootAgentId` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionQueries`/`permissionMode` are root-only |
+| Create returns 400 mentioning `legacy request shape` | The request uses the removed inline `"agent"` field — migrate to `rootAgentId` + `agents` (see Migration from the inline protocol) |
+| Create returns 503 `runtime image incompatible` | Pin `AGENT_DEPLOYER_RUNTIME_IMAGE` to a v2.4.0+ tag, or set `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` when `:latest` is known to be v2.4.0+ |
 | Create returns 500 `find existing container` | Check whether the deployer container can access `/var/run/docker.sock` |
 | `health` stays `starting` for a long time after creation | Check `GET /logs`; usually the agents.yaml `apiKey` is invalid or `baseUrl` is unreachable (see the "Provider Field Mapping" section for field origins) |
 | `health=unhealthy` | Runtime image health check failed; check the logs for the specific error |
 | 401 `unauthorized` | The server has `AGENT_DEPLOYER_API_KEY` enabled, but the request is missing the key or the key does not match |
-| 404 `agent not found` | Misspelled name, or the container was already deleted; note that names are sanitized to lowercase |
+| 404 `agent not found` | Misspelled name, or the agent was fully deleted (container + data); archived agents (container gone, data kept) return 200 with `status=archived` |
 | `hostPort` changed | Rebuilding a container reallocates the port; always query it dynamically each time |

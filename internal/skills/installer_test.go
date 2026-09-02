@@ -392,11 +392,19 @@ func TestInstaller_Install_CleansUpWorkDirOnSuccess(t *testing.T) {
 
 	require.NoError(t, inst.Install(context.Background(), src, skillsDir))
 
-	// .skills-tmp lives as sibling of skillsDir, under the agent root.
-	tmpRoot := filepath.Join(filepath.Dir(skillsDir), ".skills-tmp")
-	entries, err := os.ReadDir(tmpRoot)
-	require.NoError(t, err, "tmp root should still exist (we don't rm the root)")
-	assert.Empty(t, entries, "all work dirs should be cleaned up after success")
+	// The per-install staging ROOT is a random ".skills-*" sibling of the
+	// skills dir and is removed when the install completes — no residue
+	// (and no fixed ".skills-tmp") remains after success.
+	parent := filepath.Dir(skillsDir)
+	entries, err := os.ReadDir(parent)
+	require.NoError(t, err)
+	var staging []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".skills-") {
+			staging = append(staging, e.Name())
+		}
+	}
+	assert.Empty(t, staging, "staging roots must be cleaned up after success")
 }
 
 func TestInstaller_Install_CleansUpWorkDirOnFailure(t *testing.T) {
@@ -411,14 +419,14 @@ func TestInstaller_Install_CleansUpWorkDirOnFailure(t *testing.T) {
 	err := inst.Install(context.Background(), src, skillsDir)
 	require.Error(t, err)
 
-	tmpRoot := filepath.Join(filepath.Dir(skillsDir), ".skills-tmp")
-	entries, readErr := os.ReadDir(tmpRoot)
+	// The per-install staging root (random ".skills-*" sibling) is removed
+	// on failure too — no residue lingers after a failed install.
+	parent := filepath.Dir(skillsDir)
+	entries, readErr := os.ReadDir(parent)
 	require.NoError(t, readErr)
-	// On failure the workDir is removed by the deferred os.RemoveAll in Install.
-	// Some platforms may leave the root empty but the workDir itself must be gone.
 	for _, e := range entries {
-		assert.NotContains(t, e.Name(), src.Name,
-			"failed work dir for this skill should be removed")
+		assert.False(t, strings.HasPrefix(e.Name(), ".skills-"),
+			"failed install must not leave a staging root (%q)", e.Name())
 	}
 }
 

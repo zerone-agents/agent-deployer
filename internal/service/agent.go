@@ -31,6 +31,11 @@ var (
 	// ErrInvalidRequest is returned when the request fails validation.
 	// Handlers should map this to HTTP 400.
 	ErrInvalidRequest = errors.New("invalid request")
+
+	// ErrRuntimeIncompatible is returned when the configured runtime image
+	// cannot run the complete agent graph protocol (requires runtime
+	// v2.4.0+). Handlers should map this to HTTP 503.
+	ErrRuntimeIncompatible = errors.New("runtime image incompatible with agent graph protocol")
 )
 
 // DockerClient captures the subset of the docker.Client surface used by the
@@ -44,7 +49,6 @@ type DockerClient interface {
 	RemoveContainer(ctx context.Context, id string) error
 	InspectContainer(ctx context.Context, containerID string) (*docker.RuntimeContainer, error)
 	ContainerLogs(ctx context.Context, id string, tail int) (string, error)
-	CopySkillsToContainer(ctx context.Context, containerID, sourceDir string, skillNames []string) error
 }
 
 // AgentService orchestrates the lifecycle of agent containers, coordinating
@@ -86,10 +90,23 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		return nil, false, fmt.Errorf("%w: %s", ErrInvalidRequest, err.Error())
 	}
 
-	// Sanitize the agent name once and use it consistently everywhere: Docker
-	// labels, filesystem paths, and the YAML identity. The sanitized name is
-	// what we treat as the canonical agent identifier.
-	agentName := naming.SanitizeName(req.Agent.Name)
+	// The complete agent graph protocol requires runtime v2.4.0+; a graph that
+	// declares the maxSessionQueries contract key additionally requires v2.6.0+
+	// (pre-2.6.0 runtimes strip the key after the SDK 3.1.0 rename — runtime
+	// PR #56). Refuse deployment when the configured image cannot be proven
+	// compatible instead of silently degrading on an old runtime.
+	minMinor := 4
+	if declaresMaxSessionQueries(req.Agents) {
+		minMinor = 6
+	}
+	if err := s.checkRuntimeImage(2, minMinor); err != nil {
+		return nil, false, err
+	}
+
+	// Deployment identity: rootAgentId is the canonical name (model
+	// validation already guarantees it is in sanitized form). It is used
+	// consistently everywhere: Docker labels, filesystem paths, and the YAML root id.
+	agentName := req.RootAgentID
 
 	existing, err := s.dc.FindAgentContainer(ctx, agentName)
 	if err != nil {
@@ -101,8 +118,8 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		return s.toResponse(existing), false, nil
 	}
 
-	// The runtime token is supplied by the caller and is never generated or
-	// persisted by the deployer. It is returned only once in the Create response.
+	// The runtime token is supplied by the caller and is never generated or persisted by the
+	// deployer. It is returned only once in the Create response.
 	runtimeToken := req.RuntimeToken
 
 	if existing != nil {
@@ -120,43 +137,28 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 
 	agentDir := filepath.Join(s.cfg.DataDir, agentName, "agents")
 	sessionDir := filepath.Join(s.cfg.DataDir, agentName, "sessions")
-	skillsDir := filepath.Join(s.cfg.DataDir, agentName, "skills")
+	closureSkillsRoot := filepath.Join(agentDir, "skills")
 
-	if err := storage.EnsureDirs(agentDir, sessionDir, skillsDir); err != nil {
+	if err := storage.EnsureDirs(agentDir, sessionDir); err != nil {
 		return nil, false, fmt.Errorf("create agent directories: %w", err)
 	}
 
-	// The storage layer validates that agent.Name == name. Since we use the
-	// sanitized name as the canonical identity, set it on the agent copy
-	// before writing the YAML.
-	agent := req.Agent
-	agent.Name = agentName
-
-	// Install all declared custom tools BEFORE writing the YAML and creating
-	// the replacement container (issue #10): any tool failure aborts Create
-	// so an invalid download can never start a container. Successfully
-	// installed tools stay on disk as a valid cache, mirroring skills.
-	var customToolPaths []string
+	// Materialize the closure's artifacts before writing the YAML and creating
+	// the container: any install failure aborts Create so an invalid download
+	// can never start a container. See artifacts.go for the install layout.
 	toolsDir := filepath.Join(agentDir, "tools")
-	for _, src := range agent.CustomTools {
-		rel, err := s.toolInstaller.Install(ctx, src, toolsDir)
-		if err != nil {
-			return nil, false, fmt.Errorf("install tool %q: %w", src.Name, err)
-		}
-		customToolPaths = append(customToolPaths, rel)
+	agentToolPaths, installedToolCount, err := s.installClosureTools(ctx, req.Agents, toolsDir)
+	if err != nil {
+		return nil, false, err
 	}
 
-	if err := s.storage.WriteAgentYAML(agentName, agent, req.Provider, req.Aigc, req.Hub, customToolPaths); err != nil {
+	if err := s.storage.WriteAgentYAML(agentName, req.Agents, req.Provider, req.Aigc, req.Hub, agentToolPaths); err != nil {
 		return nil, false, fmt.Errorf("write agent YAML: %w", err)
 	}
 
-	// Install all declared skills before creating the container. Failure of
-	// any skill aborts Create; the container is not created. Skills that
-	// already downloaded successfully are left on disk as a valid cache.
-	for _, src := range agent.Skills {
-		if err := s.skillInstaller.Install(ctx, src, skillsDir); err != nil {
-			return nil, false, fmt.Errorf("install skill %q: %w", src.Name, err)
-		}
+	closureHasSkills, err := s.installClosureSkills(ctx, req.Agents, closureSkillsRoot)
+	if err != nil {
+		return nil, false, err
 	}
 
 	opts := docker.CreateOpts{
@@ -167,8 +169,6 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		RuntimeContainerPort: s.cfg.RuntimeContainerPort,
 		AgentDir:             agentDir,
 		SessionDir:           sessionDir,
-		Agent:                agent,
-		Provider:             req.Provider,
 		RuntimeToken:         runtimeToken,
 		MemoryBytes:          s.cfg.ContainerMemoryBytes,
 		NanoCPUs:             s.cfg.ContainerNanoCPUs,
@@ -179,42 +179,33 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		return nil, false, fmt.Errorf("create agent container: %w", err)
 	}
 
-	// Inject skills into the container's project-level directory via docker cp.
-	// This happens after container creation because skills are no longer
-	// bind-mounted. If cp fails, clean up the container to avoid leaving a
-	// half-configured agent, then return the error.
-	if len(agent.Skills) > 0 {
-		skillNames := make([]string, len(agent.Skills))
-		for i, s := range agent.Skills {
-			skillNames[i] = s.Name
-		}
-		if err := s.dc.CopySkillsToContainer(ctx, containerID, skillsDir, skillNames); err != nil {
-			_ = s.dc.StopContainer(ctx, containerID)
-			_ = s.dc.RemoveContainer(ctx, containerID)
-			return nil, false, fmt.Errorf("copy skills to container: %w", err)
-		}
-	}
-
-	// The response only advertises toolsDir when custom tools were actually
-	// declared, so tool-less agents keep a compact response payload.
+	// The response advertises toolsDir/skillsDir only when the graph actually
+	// declares those artifacts, keeping artifact-free responses compact.
 	toolsDirIfUsed := ""
-	if len(agent.CustomTools) > 0 {
+	if installedToolCount > 0 {
 		toolsDirIfUsed = toolsDir
+	}
+	skillsDirIfUsed := ""
+	containerSkillsDirIfUsed := ""
+	if closureHasSkills {
+		skillsDirIfUsed = closureSkillsRoot
+		containerSkillsDirIfUsed = naming.ContainerSkillsRoot
 	}
 
 	return &model.AgentResponse{
-		AgentName:     agentName,
-		InstanceID:    instanceID,
-		ContainerID:   containerID,
-		ContainerName: containerName,
-		Status:        model.StatusRunning,
-		HostPort:      hostPort,
-		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
-		YamlPath:      filepath.Join(agentDir, "agents.yaml"),
-		SessionDir:    sessionDir,
-		SkillsDir:     skillsDir,
-		ToolsDir:      toolsDirIfUsed,
-		RuntimeToken:  runtimeToken,
+		AgentName:          agentName,
+		InstanceID:         instanceID,
+		ContainerID:        containerID,
+		ContainerName:      containerName,
+		Status:             model.StatusRunning,
+		HostPort:           hostPort,
+		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
+		YamlPath:           filepath.Join(agentDir, "agents.yaml"),
+		SessionDir:         sessionDir,
+		SkillsDir:          skillsDirIfUsed,
+		ToolsDir:           toolsDirIfUsed,
+		ContainerSkillsDir: containerSkillsDirIfUsed,
+		RuntimeToken:       runtimeToken,
 	}, true, nil
 }
 
@@ -413,7 +404,7 @@ func (s *AgentService) toResponse(c *docker.RuntimeContainer) *model.AgentRespon
 		CreatedAt:     c.CreatedAt,
 		YamlPath:      filepath.Join(agentDir, "agents.yaml"),
 		SessionDir:    filepath.Join(s.cfg.DataDir, c.AgentName, "sessions"),
-		SkillsDir:     filepath.Join(s.cfg.DataDir, c.AgentName, "skills"),
+		SkillsDir:     filepath.Join(agentDir, "skills"),
 	}
 }
 
@@ -437,6 +428,15 @@ func (s *AgentService) toArchivedResponse(agentName string) *model.AgentResponse
 		Status:     model.StatusArchived,
 		YamlPath:   filepath.Join(s.cfg.DataDir, agentName, "agents", "agents.yaml"),
 		SessionDir: filepath.Join(s.cfg.DataDir, agentName, "sessions"),
-		SkillsDir:  filepath.Join(s.cfg.DataDir, agentName, "skills"),
+		SkillsDir:  filepath.Join(s.cfg.DataDir, agentName, "agents", "skills"),
 	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

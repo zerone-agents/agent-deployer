@@ -22,3 +22,13 @@ func ContainerName(prefix, agentName, instanceID string) string {
 func InstanceID() string {
 	return strings.Split(uuid.New().String(), "-")[0]
 }
+
+// ContainerSkillsRoot is the in-container root of per-agent skill directories
+// (bind-mounted at /app/config; see docker.CreateAgentContainer).
+const ContainerSkillsRoot = "/app/config/skills"
+
+// ContainerSkillDir returns the in-container directory holding the skills
+// installed for the given agent id.
+func ContainerSkillDir(agentID string) string {
+	return ContainerSkillsRoot + "/" + agentID
+}

@@ -129,16 +129,20 @@ func (i *Installer) Install(ctx context.Context, source model.SkillSource, skill
 		return fmt.Errorf("clear stale skill dir %q: %w", localDir, err)
 	}
 
-	// 准备工作目录
-	tmpRoot := filepath.Join(filepath.Dir(skillsDir), ".skills-tmp")
-	if err := os.MkdirAll(tmpRoot, 0755); err != nil {
+	// 准备工作目录: a per-install random staging ROOT (sibling of the skills
+	// dir, ".skills-" prefix) so concurrent installs never share or delete
+	// each other's staging, and the whole root — including any residue — is
+	// removed when this install completes. No fixed ".skills-tmp" directory
+	// lingers after a successful deployment.
+	tmpRoot, err := os.MkdirTemp(filepath.Dir(skillsDir), ".skills-")
+	if err != nil {
 		return fmt.Errorf("create tmp root: %w", err)
 	}
+	defer os.RemoveAll(tmpRoot)
 	workDir, err := os.MkdirTemp(tmpRoot, source.Name+"-")
 	if err != nil {
 		return fmt.Errorf("create work dir: %w", err)
 	}
-	defer os.RemoveAll(workDir)
 
 	// 下载
 	zipPath := filepath.Join(workDir, "skill.zip")

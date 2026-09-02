@@ -5,6 +5,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -52,8 +53,52 @@ func (h *AgentHandler) Register(r *gin.RouterGroup) {
 //   - 502 on skill/tool download upstream failure
 //   - 500 on internal failure
 func (h *AgentHandler) Create(c *gin.Context) {
+	body, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: "read request body: " + err.Error()})
+		return
+	}
+
+	// Reject the pre-graph protocol explicitly instead of silently degrading
+	// (issue #16): the legacy shape carried a single inline "agent" object
+	// whose subagents were five-field stubs.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(body, &probe); err != nil {
+		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: "invalid JSON body: " + err.Error()})
+		return
+	}
+	if _, legacy := probe["agent"]; legacy {
+		c.JSON(http.StatusBadRequest, model.ErrorResponse{
+			Success: false,
+			Error:   `legacy request shape ("agent" field) is no longer supported: deploy a complete agent graph with "rootAgentId" + "agents" (see docs/API.md)`,
+		})
+		return
+	}
+
+	// The renamed session-cap field must also be rejected explicitly: Go's
+	// JSON decoder silently drops unknown struct fields, so a payload
+	// carrying the legacy maxSessionTurns key would otherwise deploy with
+	// the cap silently lost.
+	if rawAgents, ok := probe["agents"]; ok {
+		var agentEntries []json.RawMessage
+		if err := json.Unmarshal(rawAgents, &agentEntries); err == nil {
+			for _, raw := range agentEntries {
+				var entry map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &entry); err == nil {
+					if _, legacy := entry["maxSessionTurns"]; legacy {
+						c.JSON(http.StatusBadRequest, model.ErrorResponse{
+							Success: false,
+							Error:   `legacy field "maxSessionTurns" is no longer supported: the session cap was renamed to "maxSessionQueries" (runtime v2.6.0+ / SDK 3.1.0); update the request body`,
+						})
+						return
+					}
+				}
+			}
+		}
+	}
+
 	var req model.CreateAgentRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		c.JSON(http.StatusBadRequest, model.ErrorResponse{Success: false, Error: err.Error()})
 		return
 	}
@@ -64,6 +109,9 @@ func (h *AgentHandler) Create(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrInvalidRequest):
 			status = http.StatusBadRequest
+		case errors.Is(err, service.ErrRuntimeIncompatible):
+			// Server-side runtime image config cannot run the graph protocol.
+			status = http.StatusServiceUnavailable
 		case errors.Is(err, skills.ErrHashMismatch),
 			errors.Is(err, skills.ErrZipSlip),
 			errors.Is(err, skills.ErrSizeExceeded),

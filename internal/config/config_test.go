@@ -101,3 +101,18 @@ func TestLoad_DataDirAbsolute(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must be an absolute path")
 }
+
+func TestLoad_RuntimeImageAssumeLatest(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", "/tmp/x")
+	t.Setenv("AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST", "true")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.RuntimeImageAssumeLatest)
+}
+
+func TestLoad_RuntimeImageAssumeLatestDefaultFalse(t *testing.T) {
+	t.Setenv("AGENT_DEPLOYER_DATA_DIR", "/tmp/x")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.RuntimeImageAssumeLatest)
+}

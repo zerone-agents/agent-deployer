@@ -23,3 +23,9 @@ func TestInstanceID(t *testing.T) {
 	assert.Len(t, id, 8)
 	assert.NotContains(t, id, "-")
 }
+
+func TestContainerSkillDir(t *testing.T) {
+	if got := ContainerSkillDir("child-a"); got != "/app/config/skills/child-a" {
+		t.Errorf("ContainerSkillDir(\"child-a\") = %q, want /app/config/skills/child-a", got)
+	}
+}

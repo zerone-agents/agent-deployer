@@ -15,6 +15,10 @@ type Config struct {
 	APIKey               string
 	ContainerMemoryBytes int64 // 0 = unlimited
 	ContainerNanoCPUs    int64 // 0 = unlimited
+	// RuntimeImageAssumeLatest permits deploying the agent graph protocol to a
+	// :latest (or untagged) runtime image. Only set when :latest is known to
+	// point at a v2.4.0+ build.
+	RuntimeImageAssumeLatest bool
 }
 
 func Load() (*Config, error) {
@@ -41,6 +45,11 @@ func Load() (*Config, error) {
 	runtimeImage := os.Getenv("AGENT_DEPLOYER_RUNTIME_IMAGE")
 	if runtimeImage == "" {
 		runtimeImage = "open-agent-runtime:latest"
+	}
+
+	assumeLatest := false
+	if v := os.Getenv("AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST"); v == "true" || v == "1" {
+		assumeLatest = true
 	}
 
 	containerPort := 3000
@@ -81,12 +90,13 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		DataDir:              dataDir,
-		Port:                 port,
-		RuntimeImage:         runtimeImage,
-		RuntimeContainerPort: containerPort,
-		APIKey:               os.Getenv("AGENT_DEPLOYER_API_KEY"),
-		ContainerMemoryBytes: containerMemoryMB * 1024 * 1024,
-		ContainerNanoCPUs:    int64(containerCPUs * 1e9),
+		DataDir:                  dataDir,
+		Port:                     port,
+		RuntimeImage:             runtimeImage,
+		RuntimeContainerPort:     containerPort,
+		APIKey:                   os.Getenv("AGENT_DEPLOYER_API_KEY"),
+		ContainerMemoryBytes:     containerMemoryMB * 1024 * 1024,
+		ContainerNanoCPUs:        int64(containerCPUs * 1e9),
+		RuntimeImageAssumeLatest: assumeLatest,
 	}, nil
 }

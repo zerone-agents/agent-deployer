@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/zerone-agent/agent-deployer/internal/model"
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 	"gopkg.in/yaml.v3"
 )
 
@@ -42,21 +46,35 @@ type runtimeAgentEntry struct {
 	// provider.Protocol passed through verbatim — both sides use the same
 	// enum (anthropic-messages / openai-completions). Field order mirrors
 	// the runtime's own docs example: model, apiType, baseURL, apiKey.
-	APIType         string   `yaml:"apiType,omitempty"`
-	BaseURL         string   `yaml:"baseURL,omitempty"`
-	APIKey          string   `yaml:"apiKey,omitempty"`
-	SystemPrompt    string   `yaml:"systemPrompt,omitempty"`
-	MaxTurns        *int     `yaml:"maxTurns,omitempty"`
-	MaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
-	PermissionMode  string   `yaml:"permissionMode,omitempty"`
-	AllowedTools    []string `yaml:"allowedTools,omitempty"`
-	// CustomTools lists verified tool file paths relative to the configDir
-	// (issue #10). Main entry only; the runtime resolves them itself.
-	CustomTools    []string                         `yaml:"customTools,omitempty"`
-	SettingSources []string                         `yaml:"settingSources,omitempty"`
-	Subagents      []string                         `yaml:"subagents,omitempty"`
-	McpServers     map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
-	Datasets       map[string]string                `yaml:"datasets,omitempty"`
+	APIType      string `yaml:"apiType,omitempty"`
+	BaseURL      string `yaml:"baseURL,omitempty"`
+	APIKey       string `yaml:"apiKey,omitempty"`
+	SystemPrompt string `yaml:"systemPrompt,omitempty"`
+	// SystemPromptFile replaces SystemPrompt when the prompt text is
+	// externalized (runtime v2.4.0+ mutual-exclusion refine): a path relative
+	// to the configDir, pointing at prompts/<id>-<hash>.md inside the agents
+	// directory. Keeps long prompts out of the YAML document.
+	SystemPromptFile  string `yaml:"systemPromptFile,omitempty"`
+	MaxTurns          *int   `yaml:"maxTurns,omitempty"`
+	MaxSessionQueries *int   `yaml:"maxSessionQueries,omitempty"`
+	// LegacyMaxSessionTurns reads the pre-rename contract key
+	// (maxSessionTurns) from deployments written before SDK 3.1.0's rename
+	// (runtime PR #56): without it, upgrading deployer would silently lose
+	// the session cap stored on disk. Read-only — writes always use
+	// maxSessionQueries.
+	LegacyMaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
+	PermissionMode        string   `yaml:"permissionMode,omitempty"`
+	AllowedTools          []string `yaml:"allowedTools,omitempty"`
+	DisallowedTools       []string `yaml:"disallowedTools,omitempty"`
+	// CustomTools lists verified tool file paths relative to the configDir (issue
+	// #10); each entry carries only the paths its own agent declared. The
+	// runtime resolves them itself.
+	CustomTools        []string                         `yaml:"customTools,omitempty"`
+	SettingSources     []string                         `yaml:"settingSources,omitempty"`
+	ExtraUserSkillDirs []string                         `yaml:"extraUserSkillDirs,omitempty"`
+	Subagents          []string                         `yaml:"subagents,omitempty"`
+	McpServers         map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
+	Datasets           map[string]string                `yaml:"datasets,omitempty"`
 }
 
 // runtimeAigcSection is the shape of the top-level "aigc" section in the
@@ -88,79 +106,110 @@ type runtimeAgentsYAML struct {
 	Aigc   *runtimeAigcSection `yaml:"aigc,omitempty"`
 	Hub    *runtimeHubSection  `yaml:"hub,omitempty"`
 	Agents []runtimeAgentEntry `yaml:"agents"`
+	// XDeployerManifest embeds the deployer-private artifact declarations
+	// (Skill/Tool url+hash) in the SAME authoritative file. The runtime's
+	// zod schema strips unknown top-level keys, so this section is invisible
+	// to the runtime while making the write a single atomic file replacement
+	// (fourth review round: one authoritative persisted document).
+	XDeployerManifest map[string]agentArtifacts `yaml:"x-deployer-manifest,omitempty"`
 }
 
-// WriteAgentYAML writes the agent definition to <agentsDir>/<name>/agents.yaml
-// in the runtime agents.yaml format. customToolPaths are written verbatim
-// (sorted, "./"-relative to the configDir) under the main entry's customTools;
-// nil/empty omits the key.
-func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, customToolPaths []string) error {
-	if strings.TrimSpace(agent.Name) == "" {
-		return fmt.Errorf("agent.Name is required")
-	}
-	if agent.Name != name {
-		return fmt.Errorf("agent.Name %q does not match storage name %q", agent.Name, name)
-	}
+// WriteAgentYAML writes the complete agent graph to
+// <dataDir>/<rootName>/agents/agents.yaml in the runtime v2.4.0+ format: every
+// agent is a first-class entry and subagents are pure id references. Provider
+// credentials and model (runtime-global) are written to the root entry only.
+// toolPaths maps agent id -> verified "./tools/..." paths for that agent.
+// Agents that declare skills get their per-agent skill dir injected as an
+// extraUserSkillDirs entry (user-level scan; see the service install layout).
+func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, toolPaths map[string][]string) error {
 	// Defense-in-depth: reject path traversal in the name parameter so a
-	// caller cannot escape agentsDir via "../" or absolute paths.
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
-		return fmt.Errorf("invalid agent name %q: must be a single path segment", name)
+	// caller cannot escape dataDir via "../" or absolute paths.
+	if rootName == "" || rootName == "." || rootName == ".." || strings.ContainsAny(rootName, `/\`) {
+		return fmt.Errorf("invalid agent name %q: must be a single path segment", rootName)
 	}
 
-	settingSources := agent.SettingSources
-	if len(settingSources) == 0 {
-		settingSources = []string{"project"}
+	byID := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		byID[a.Name] = true
 	}
-
-	entry := runtimeAgentEntry{
-		ID:              name,
-		Name:            name,
-		Description:     agent.Description,
-		Model:           agent.Model,
-		SystemPrompt:    agent.SystemPrompt,
-		MaxTurns:        agent.MaxTurns,
-		MaxSessionTurns: agent.MaxSessionTurns,
-		PermissionMode:  agent.PermissionMode,
-		AllowedTools:    agent.Tools,
-		SettingSources:  settingSources,
-		McpServers:      agent.McpServers,
-		Datasets:        agent.Datasets,
-		APIKey:          provider.APIKey,
-		BaseURL:         provider.BaseURL,
-		APIType:         provider.Protocol,
+	if !byID[rootName] {
+		return fmt.Errorf("no agent with id %q in graph", rootName)
 	}
+	promptRefs := computeSystemPromptRefs(agents)
 
-	if len(customToolPaths) > 0 {
-		sorted := make([]string, len(customToolPaths))
-		copy(sorted, customToolPaths)
-		sort.Strings(sorted)
-		entry.CustomTools = sorted
-	}
-
-	entries := []runtimeAgentEntry{entry}
-
-	// Runtime 2.0 mount-by-reference: each subagent becomes a first-class
-	// top-level entry, and the main entry references it by id. Subagent
-	// entries carry only the 5 fields the runtime maps when mounting
-	// (description, systemPrompt, allowedTools, disallowedTools, maxTurns) —
-	// model, mcpServers and per-agent credentials are intentionally omitted
-	// because they do not apply in the mounted context.
-	if len(agent.Subagents) > 0 {
-		entries[0].Subagents = make([]string, 0, len(agent.Subagents))
-		for _, sub := range agent.Subagents {
-			entries[0].Subagents = append(entries[0].Subagents, sub.Name)
-			entries = append(entries, runtimeAgentEntry{
-				ID:           sub.Name,
-				Name:         sub.Name,
-				Description:  sub.Description,
-				SystemPrompt: sub.Prompt,
-				AllowedTools: sub.Tools,
-				MaxTurns:     sub.MaxTurns,
-			})
+	entries := make([]runtimeAgentEntry, 0, len(agents))
+	for _, a := range agents {
+		entry := runtimeAgentEntry{
+			ID:              a.Name,
+			Name:            a.Name,
+			Description:     a.Description,
+			MaxTurns:        a.MaxTurns,
+			AllowedTools:    a.Tools,
+			DisallowedTools: a.DisallowedTools,
+			SettingSources:  a.SettingSources,
+			Subagents:       a.Subagents,
+			McpServers:      a.McpServers,
+			Datasets:        a.Datasets,
 		}
+		if ref := promptRefs[a.Name]; ref != "" {
+			// Long prompts live in a file (runtime v2.4.0+ systemPromptFile,
+			// mutually exclusive with systemPrompt); the deployer writes the
+			// staged file BEFORE the atomic agents.yaml commit, and the
+			// content-hashed file name means an older YAML still references
+			// its own prompt — no cross-generation pollution.
+			entry.SystemPromptFile = ref
+		}
+
+		if a.Name == rootName {
+			// Runtime-global execution environment (issue #16): credentials and
+			// model on the root entry only; mounted agents reuse the root
+			// process environment and never receive their own copy.
+			entry.Model = a.Model
+			entry.MaxSessionQueries = a.MaxSessionQueries
+			entry.PermissionMode = a.PermissionMode
+			entry.APIKey = provider.APIKey
+			entry.BaseURL = provider.BaseURL
+			entry.APIType = provider.Protocol
+			if len(entry.SettingSources) == 0 {
+				entry.SettingSources = []string{"project"}
+			}
+		}
+
+		if paths := toolPaths[a.Name]; len(paths) > 0 {
+			sorted := make([]string, len(paths))
+			copy(sorted, paths)
+			sort.Strings(sorted)
+			entry.CustomTools = sorted
+		}
+
+		// Per-agent skill visibility: skills install under
+		// <agentsDir>/skills/<id>/ and are scanned at user level. model
+		// validation already guarantees settingSources contains "user".
+		if len(a.Skills) > 0 {
+			skillDir := naming.ContainerSkillDir(a.Name)
+			if !containsString(entry.ExtraUserSkillDirs, skillDir) {
+				entry.ExtraUserSkillDirs = append(entry.ExtraUserSkillDirs, skillDir)
+			}
+		}
+
+		entries = append(entries, entry)
 	}
 
 	doc := runtimeAgentsYAML{Agents: entries}
+
+	// Embed the artifact declarations that the runtime schema cannot express.
+	// Keeping them in the SAME file is what makes the update transactional:
+	// one document, one atomic rename, no cross-file window.
+	embedded := make(map[string]agentArtifacts, len(agents))
+	for _, a := range agents {
+		if len(a.Skills) == 0 && len(a.CustomTools) == 0 {
+			continue
+		}
+		embedded[a.Name] = agentArtifacts{Skills: a.Skills, CustomTools: a.CustomTools}
+	}
+	if len(embedded) > 0 {
+		doc.XDeployerManifest = embedded
+	}
 
 	if aigc != nil && aigc.Enabled {
 		hint := aigc.ExplicitHint
@@ -193,21 +242,233 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 		return fmt.Errorf("marshal agent YAML: %w", err)
 	}
 
-	agentDir := filepath.Join(s.dataDir, name, "agents")
+	agentDir := filepath.Join(s.dataDir, rootName, "agents")
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return fmt.Errorf("create agent directory: %w", err)
 	}
 
-	filePath := filepath.Join(agentDir, "agents.yaml")
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	// Stage the externalized system prompts BEFORE the atomic agents.yaml
+	// commit: a failure here leaves the previous deployment untouched, and
+	// because prompt file names embed a content hash, the old YAML keeps
+	// pointing at its own prompt file — the commit of agents.yaml is the
+	// single switch point.
+	if err := writeSystemPromptFiles(agentDir, agents); err != nil {
+		return err
+	}
+
+	// agents.yaml is the SINGLE authoritative document (graph + artifact
+	// declarations): staged tmp + atomic rename. A failed or interrupted
+	// update leaves the previous deployment fully intact and losslessly
+	// readable — no separate manifest file can get out of sync.
+	yamlTmp := filepath.Join(agentDir, "agents.yaml.tmp")
+	if err := os.WriteFile(yamlTmp, data, 0644); err != nil {
 		return fmt.Errorf("write agent YAML: %w", err)
 	}
+	if err := os.Rename(yamlTmp, filepath.Join(agentDir, "agents.yaml")); err != nil {
+		return fmt.Errorf("replace agent YAML: %w", err)
+	}
+
+	// The new YAML has committed. The legacy sidecar is now pure residue and
+	// cleanup is best-effort: a failure AFTER commit must not report a failed
+	// deployment — the durable state IS the new document, and the leftover
+	// sidecar is harmless (read-back prefers the embedded section; sixth
+	// review round).
+	removeLegacyManifest(agentDir)
+
+	// Reclaim superseded prompt generations (best-effort): keep exactly the
+	// files the committed document references.
+	gcPromptFiles(agentDir, promptRefs)
 
 	return nil
 }
 
-// ReadAgentYAML reads the agent definition from <agentsDir>/<name>/agents.yaml.
-func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error) {
+// computeSystemPromptRefs maps each agent with a systemPrompt to its
+// external file reference (./prompts/<id>-<sha16>.md). The content-hashed
+// file name keeps consecutive deployments of the same agent from
+// overwriting a prompt a previous YAML document still references.
+// promptFileName is the single prompt-reference/filename rule: the extension
+// is the FIRST 16 hex chars of the sha256 of the prompt text (64-bit space —
+// the hash only separates prompt generations within one deployment directory,
+// where collisions are negligible). The YAML reference and the written file
+// can never drift, different prompts cannot plausibly collide onto the same
+// path, and a file an older YAML references is never rewritten by a later
+// generation. Empty prompts produce no reference.
+func promptFileName(agentID, text string) string {
+	return fmt.Sprintf("%s-%s.md", agentID, sha256Hex([]byte(text))[:16])
+}
+
+// computeSystemPromptRefs maps each agent with a systemPrompt to its
+// external file reference (./prompts/<id>-<sha16>.md).
+func computeSystemPromptRefs(agents []model.AgentDefinition) map[string]string {
+	refs := make(map[string]string, len(agents))
+	for _, a := range agents {
+		if a.SystemPrompt == "" {
+			continue
+		}
+		refs[a.Name] = "./prompts/" + promptFileName(a.Name, a.SystemPrompt)
+	}
+	return refs
+}
+
+// writeSystemPromptFiles stages every declared systemPrompt into
+// <agentDir>/prompts/<id>-<sha16>.md, atomically per file. A file whose
+// content already matches is skipped — the live prompt referenced by the
+// currently committed YAML is never touched. Otherwise the new content is
+// written to a sibling temporary file, synced, and renamed into place (the
+// full-digest name means the rename targets a fresh path, so a failed
+// update can never corrupt an old generation's file).
+func writeSystemPromptFiles(agentDir string, agents []model.AgentDefinition) error {
+	promptsDir := filepath.Join(agentDir, "prompts")
+	for _, a := range agents {
+		if a.SystemPrompt == "" {
+			continue
+		}
+		if err := os.MkdirAll(promptsDir, 0755); err != nil {
+			return fmt.Errorf("create prompts directory: %w", err)
+		}
+		name := promptFileName(a.Name, a.SystemPrompt)
+		final := filepath.Join(promptsDir, name)
+		if existing, err := os.ReadFile(final); err == nil && string(existing) == a.SystemPrompt {
+			continue // content-addressed file already matches; never rewrite it
+		}
+		// os.CreateTemp uses a random sibling name with O_EXCL semantics:
+		// unlike a fixed "<final>.tmp" + os.Create (O_TRUNC), it never
+		// follows a pre-planted symlink out of the prompts directory, and
+		// concurrent writers cannot collide on one staging path.
+		tmp, err := os.CreateTemp(promptsDir, name+".tmp-*")
+		if err != nil {
+			return fmt.Errorf("create system prompt staging for agent %q: %w", a.Name, err)
+		}
+		tmpName := tmp.Name()
+		if _, err := tmp.WriteString(a.SystemPrompt); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("write system prompt for agent %q: %w", a.Name, err)
+		}
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("sync system prompt for agent %q: %w", a.Name, err)
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("close system prompt for agent %q: %w", a.Name, err)
+		}
+		if err := os.Rename(tmpName, final); err != nil {
+			_ = os.Remove(tmpName)
+			return fmt.Errorf("replace system prompt for agent %q: %w", a.Name, err)
+		}
+	}
+	return nil
+}
+
+// gcPromptFiles reclaims superseded prompt generations after a successful
+// agents.yaml commit: exactly the files referenced by the committed document
+// are retained, everything else in the prompts directory is removed. The
+// content-hashed naming makes this safe — any file not in the reference set
+// can no longer be referenced by any generation of the document. Best-effort
+// (a directory-level failure only leaves garbage on disk).
+func gcPromptFiles(agentDir string, refs map[string]string) {
+	promptsDir := filepath.Join(agentDir, "prompts")
+	keep := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		keep[filepath.Base(filepath.FromSlash(ref))] = true
+	}
+	entries, err := os.ReadDir(promptsDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		_ = os.Remove(filepath.Join(promptsDir, e.Name()))
+	}
+}
+
+// removeLegacyManifest deletes the deploy-manifest.json sidecar written by
+// pre-embedded-section deployer versions, best-effort. It runs only after the
+// new agents.yaml has committed atomically; a leftover sidecar is harmless
+// (ReadAgentYAML prefers the embedded x-deployer-manifest section and never
+// mixes representations), so cleanup failure must never fail the deployment.
+func removeLegacyManifest(agentDir string) {
+	if err := os.Remove(filepath.Join(agentDir, "deploy-manifest.json")); err != nil && !os.IsNotExist(err) {
+		// Best-effort: the embedded section fully supersedes the sidecar.
+	}
+}
+
+// deploymentManifest is the LEGACY sidecar format written by deployer
+// versions before artifact declarations were embedded in agents.yaml's
+// x-deployer-manifest section. It is kept read-only for compatibility:
+// YAMLDigest binds it to the exact agents.yaml generation it was written
+// for, and ReadAgentYAML merges its artifacts only on a digest match — a
+// leftover from an aborted generation is ignored instead of polluting the
+// current graph. New writes embed the section and remove the sidecar.
+type deploymentManifest struct {
+	RootAgentID string                    `json:"rootAgentId"`
+	YAMLDigest  string                    `json:"yamlDigest"`
+	Artifacts   map[string]agentArtifacts `json:"artifacts"` // agent id → declared artifacts
+}
+
+type agentArtifacts struct {
+	Skills      []model.SkillSource `yaml:"skills,omitempty" json:"skills,omitempty"`
+	CustomTools []model.ToolSource  `yaml:"customTools,omitempty" json:"customTools,omitempty"`
+}
+
+// loadDeploymentManifest merges the persisted artifact declarations into the
+// graph read from agents.yaml — but ONLY when the manifest's recorded
+// yamlDigest matches the agents.yaml actually being read (committed
+// generation). A mismatched manifest is an aborted-generation leftover and is
+// silently ignored: the interruption window fails toward "artifacts lost",
+// never "artifacts resurrected". A missing manifest (pre-manifest or
+// hand-written deployments) likewise reads back artifact-free; a corrupt
+// manifest fails explicitly because a silently lossy round trip is worse.
+func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph, yamlDigest string) error {
+	data, err := os.ReadFile(filepath.Join(s.dataDir, name, "agents", "deploy-manifest.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read deploy-manifest: %w", err)
+	}
+	var m deploymentManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("parse deploy-manifest: %w", err)
+	}
+	if m.YAMLDigest == "" || m.YAMLDigest != yamlDigest {
+		return nil
+	}
+	for i := range graph.Agents {
+		arts := m.Artifacts[graph.Agents[i].Name]
+		if arts.Skills != nil {
+			graph.Agents[i].Skills = arts.Skills
+		}
+		if arts.CustomTools != nil {
+			graph.Agents[i].CustomTools = arts.CustomTools
+		}
+	}
+	return nil
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// AgentGraph is the complete agent graph read back from agents.yaml.
+type AgentGraph struct {
+	RootAgentID string
+	Agents      []model.AgentDefinition
+}
+
+// ReadAgentYAML reads the complete agent graph from
+// <dataDir>/<name>/agents/agents.yaml. The root entry is the one whose id
+// matches the storage name. Artifact declarations (Skill/Tool url+hash)
+// round-trip through the deployer-private x-deployer-manifest section
+// EMBEDDED in the same file; a legacy deploy-manifest.json sidecar from
+// pre-embedded-section versions is honored for compatibility (digest-bound)
+// only when the section is absent.
+func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 	filePath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -223,55 +484,101 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error
 		return nil, ErrNoAgents
 	}
 
-	// The main entry is the one whose id matches the storage name; subagent
-	// entries share the same file as first-class agents.
-	byID := make(map[string]runtimeAgentEntry, len(doc.Agents))
+	graph := &AgentGraph{RootAgentID: name}
+	foundRoot := false
 	for _, e := range doc.Agents {
-		byID[e.ID] = e
+		entryName := e.Name
+		if entryName == "" {
+			entryName = e.ID
+		}
+		if e.ID == name {
+			foundRoot = true
+		}
+		def := model.AgentDefinition{
+			Name:              entryName,
+			Description:       e.Description,
+			Model:             e.Model,
+			SystemPrompt:      e.SystemPrompt,
+			MaxTurns:          e.MaxTurns,
+			MaxSessionQueries: e.MaxSessionQueries,
+			PermissionMode:    e.PermissionMode,
+			Tools:             e.AllowedTools,
+			DisallowedTools:   e.DisallowedTools,
+			SettingSources:    e.SettingSources,
+			McpServers:        e.McpServers,
+			Datasets:          e.Datasets,
+			Subagents:         e.Subagents,
+		}
+		if e.SystemPromptFile != "" {
+			// Resolve the externalized prompt back into graph text so the
+			// API shape never changes. Containment is verified on the
+			// RESOLVED path (EvalSymlinks both sides): a lexical prompts/
+			// prefix can be bypassed by a symlink inside the directory, and
+			// os.ReadFile would follow it. A missing prompt file is an
+			// explicit error — silent prompt loss is worse.
+			clean := filepath.Clean(filepath.FromSlash(e.SystemPromptFile))
+			if !strings.HasPrefix(clean, "prompts"+string(filepath.Separator)) {
+				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory", entryName, e.SystemPromptFile)
+			}
+			target := filepath.Join(s.dataDir, name, "agents", clean)
+			realTarget, rerr := filepath.EvalSymlinks(target)
+			if rerr != nil {
+				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, rerr)
+			}
+			realAgentDir, aerr := filepath.EvalSymlinks(filepath.Join(s.dataDir, name, "agents"))
+			if aerr != nil {
+				return nil, fmt.Errorf("resolve agents directory: %w", aerr)
+			}
+			realPrompts := filepath.Join(realAgentDir, "prompts")
+			if !strings.HasPrefix(realTarget, realPrompts+string(filepath.Separator)) {
+				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory (resolved %q)", entryName, e.SystemPromptFile, realTarget)
+			}
+			content, cerr := os.ReadFile(realTarget)
+			if cerr != nil {
+				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, cerr)
+			}
+			def.SystemPrompt = string(content)
+		}
+		// Pre-rename deployments stored the session cap under
+		// maxSessionTurns (SDK 3.1.0 rename, runtime PR #56); fall back so an
+		// upgrade never silently drops the on-disk cap.
+		if def.MaxSessionQueries == nil && e.LegacyMaxSessionTurns != nil {
+			def.MaxSessionQueries = e.LegacyMaxSessionTurns
+		}
+		graph.Agents = append(graph.Agents, def)
 	}
-	entry, ok := byID[name]
-	if !ok {
+	if !foundRoot {
 		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
 	}
-
-	// `name` is optional in the runtime schema (falls back to id); mirror that.
-	entryName := entry.Name
-	if entryName == "" {
-		entryName = entry.ID
-	}
-
-	agent := model.AgentDefinition{
-		Name:            entryName,
-		Description:     entry.Description,
-		Model:           entry.Model,
-		SystemPrompt:    entry.SystemPrompt,
-		MaxTurns:        entry.MaxTurns,
-		MaxSessionTurns: entry.MaxSessionTurns,
-		PermissionMode:  entry.PermissionMode,
-		Tools:           entry.AllowedTools,
-		SettingSources:  entry.SettingSources,
-		McpServers:      entry.McpServers,
-		Datasets:        entry.Datasets,
-	}
-
-	// Resolve subagent id references back to their definitions. Unknown
-	// references are skipped: the runtime rejects such configs at startup, so
-	// a readable file here implies they resolve; defensively ignore anyway.
-	for _, subID := range entry.Subagents {
-		sub, ok := byID[subID]
-		if !ok {
-			continue
+	// Artifact declarations: prefer the embedded x-deployer-manifest section —
+	// same file, same generation, atomic by construction. Deployments written
+	// before the section existed fall back to the legacy sidecar, merged only
+	// on a digest match.
+	if len(doc.XDeployerManifest) > 0 {
+		for i := range graph.Agents {
+			arts := doc.XDeployerManifest[graph.Agents[i].Name]
+			if arts.Skills != nil {
+				graph.Agents[i].Skills = arts.Skills
+			}
+			if arts.CustomTools != nil {
+				graph.Agents[i].CustomTools = arts.CustomTools
+			}
 		}
-		agent.Subagents = append(agent.Subagents, model.SubagentDefinition{
-			Name:        subID,
-			Description: sub.Description,
-			Prompt:      sub.SystemPrompt,
-			Tools:       sub.AllowedTools,
-			MaxTurns:    sub.MaxTurns,
-		})
+		return graph, nil
 	}
+	if err := s.loadDeploymentManifest(name, graph, sha256Hex(data)); err != nil {
+		return nil, err
+	}
+	return graph, nil
+}
 
-	return &agent, nil
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureDirs creates all the given directories with mode 0755 if they don't exist.
@@ -320,10 +627,11 @@ func (s *AgentStorage) ListAgentDirs() ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		// Skip the internal temp dir used by skill installs.
-		if name == ".skills-tmp" {
-			continue
-		}
+		// NOTE: no name-based filtering here. Skill-install staging roots
+		// live INSIDE a deployment (<agentsDir>/skills/.skills-*), never at
+		// the data-dir top level — and a top-level name like `.skills-prod`
+		// is a perfectly valid agent id, so entries are validated purely by
+		// the presence of agents/agents.yaml below.
 		yamlPath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
 		if _, err := os.Stat(yamlPath); err != nil {
 			if os.IsNotExist(err) {
