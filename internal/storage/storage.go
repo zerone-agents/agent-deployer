@@ -51,7 +51,7 @@ type runtimeAgentEntry struct {
 	APIKey       string `yaml:"apiKey,omitempty"`
 	SystemPrompt string `yaml:"systemPrompt,omitempty"`
 	// SystemPromptFile replaces SystemPrompt when the prompt text is
-	// externalized (runtime v2.5.0 mutual-exclusion refine): a path relative
+	// externalized (runtime v2.4.0+ mutual-exclusion refine): a path relative
 	// to the configDir, pointing at prompts/<id>-<hash>.md inside the agents
 	// directory. Keeps long prompts out of the YAML document.
 	SystemPromptFile string   `yaml:"systemPromptFile,omitempty"`
@@ -146,7 +146,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 			Datasets:        a.Datasets,
 		}
 		if ref := promptRefs[a.Name]; ref != "" {
-			// Long prompts live in a file (runtime v2.5.0 systemPromptFile,
+			// Long prompts live in a file (runtime v2.4.0+ systemPromptFile,
 			// mutually exclusive with systemPrompt); the deployer writes the
 			// staged file BEFORE the atomic agents.yaml commit, and the
 			// content-hashed file name means an older YAML still references
