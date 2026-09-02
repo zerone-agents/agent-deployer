@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1431,4 +1432,88 @@ func TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment(t *testing.T
 	require.NoError(t, rerr)
 	assert.Contains(t, string(yamlBytes), "first",
 		"manifest write failure must not touch the previous agents.yaml")
+}
+
+// TestReadAgentYAML_GenerationMismatchedManifestIgnored guards the
+// transactional read rule (third review round): the manifest is only merged
+// when its recorded yamlDigest matches the agents.yaml actually being read.
+// A manifest from an aborted generation (new manifest + old YAML) must be
+// ignored instead of merging its artifacts into the old graph.
+func TestReadAgentYAML_GenerationMismatchedManifestIgnored(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "s"},
+		{Name: "child-a", Description: "c", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "skill-one", URL: "https://example.com/1.zip", Hash: strings.Repeat("a", 64)}}},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+
+	// Simulate the interrupted-generation window: the manifest was replaced
+	// for a NEW deployment (different YAML), but agents.yaml stayed old.
+	manifestPath := filepath.Join(dir, "parent", "agents", "deploy-manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+	var tampered struct {
+		RootAgentID string `json:"rootAgentId"`
+		YAMLDigest  string `json:"yamlDigest"`
+		Artifacts   map[string]struct {
+			Skills []model.SkillSource `json:"skills"`
+		} `json:"artifacts"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &tampered))
+	tampered.YAMLDigest = strings.Repeat("0", 64) // digest of a YAML that never landed
+	out, err := json.Marshal(&tampered)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, out, 0644))
+
+	graph, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	for _, a := range graph.Agents {
+		assert.Empty(t, a.Skills,
+			"agent %s: artifacts from a mismatched manifest generation must not be merged", a.Name)
+	}
+}
+
+// TestWriteAgentYAML_YamlStageFailureAfterManifestReplace covers the window
+// AFTER the manifest replacement: the second deployment's YAML staging fails,
+// leaving old YAML + new manifest on disk. ReadAgentYAML must report the OLD
+// graph without resurrecting the new deployment's artifacts.
+func TestWriteAgentYAML_YamlStageFailureAfterManifestReplace(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+
+	first := []model.AgentDefinition{
+		{Name: "parent", Description: "first", Model: "m", SystemPrompt: "s"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+
+	// Squat the YAML staging path: the second write replaces the manifest
+	// successfully, then fails staging agents.yaml.tmp.
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "parent", "agents", "agents.yaml.tmp"), 0755))
+
+	second := []model.AgentDefinition{
+		{Name: "parent", Description: "second", Model: "m", SystemPrompt: "s2",
+			SettingSources: []string{"user"},
+			Skills:         []model.SkillSource{{Name: "new-skill", URL: "https://example.com/n.zip", Hash: strings.Repeat("c", 64)}}},
+	}
+	err := store.WriteAgentYAML("parent", second, provider, nil, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent YAML")
+
+	// The manifest on disk is already the SECOND generation...
+	manifestRaw, rerr := os.ReadFile(filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
+	require.NoError(t, rerr)
+	assert.Contains(t, string(manifestRaw), "new-skill", "precondition: manifest was replaced first")
+
+	// ...but read-back reports the OLD graph with NO resurrected artifacts.
+	graph, rerr := store.ReadAgentYAML("parent")
+	require.NoError(t, rerr)
+	require.Len(t, graph.Agents, 1)
+	assert.Equal(t, "first", graph.Agents[0].Description)
+	assert.Empty(t, graph.Agents[0].Skills,
+		"the new generation's artifacts must not be merged into the old YAML")
 }

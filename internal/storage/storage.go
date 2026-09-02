@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -207,13 +209,13 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	}
 
 	// Write order (review finding): manifest FIRST, agents.yaml second — both
-	// via staged tmp + atomic rename. A crash between the two leaves a NEW
-	// manifest next to the OLD YAML; read-back is driven by the YAML graph,
-	// and manifest entries for absent agent ids are ignored, so the window
-	// degrades safely. The reverse order (new YAML + stale manifest) would
-	// resurrect removed capabilities, and a manifest write failure must leave
-	// the previous deployment fully intact.
-	if err := writeDeploymentManifest(agentDir, rootName, agents); err != nil {
+	// via staged tmp + atomic rename, with the manifest bound to the NEW
+	// YAML's digest. Any interruption window therefore pairs a new manifest
+	// with an old YAML whose digest does not match: read-back ignores the
+	// manifest entirely (artifacts lost, never resurrected into the old
+	// graph), and a manifest write failure leaves the previous deployment
+	// fully intact.
+	if err := writeDeploymentManifest(agentDir, rootName, agents, sha256Hex(data)); err != nil {
 		return err
 	}
 
@@ -230,10 +232,15 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 
 // deploymentManifest is the deployer-private sidecar persisting the artifact
 // declarations the runtime agents.yaml cannot express (SkillSource/ToolSource
-// url + hash). ReadAgentYAML merges it back so a read→write cycle restores
-// the complete deployment graph losslessly (issue #16).
+// url + hash). YAMLDigest binds the manifest to the exact agents.yaml
+// generation it was written for: ReadAgentYAML merges artifacts ONLY on a
+// digest match, so a manifest left over from an aborted generation (new
+// manifest + old YAML, same agent ids) is ignored instead of polluting the
+// old graph — every interruption window degrades to "artifacts lost", never
+// "artifacts resurrected" (issue #16, third review round).
 type deploymentManifest struct {
 	RootAgentID string                    `json:"rootAgentId"`
+	YAMLDigest  string                    `json:"yamlDigest"`
 	Artifacts   map[string]agentArtifacts `json:"artifacts"` // agent id → declared artifacts
 }
 
@@ -243,13 +250,14 @@ type agentArtifacts struct {
 }
 
 // writeDeploymentManifest stores the per-agent artifact declarations next to
-// agents.yaml (staged tmp + atomic rename). An artifact-FREE graph REMOVES a
-// previous manifest — otherwise ReadAgentYAML would resurrect the removed
-// capabilities into the new deployment.
-func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefinition) error {
+// agents.yaml (staged tmp + atomic rename), bound to yamlDigest — the sha256
+// of the agents.yaml bytes written in the SAME deployment. An artifact-FREE
+// graph REMOVES a previous manifest — otherwise ReadAgentYAML would resurrect
+// the removed capabilities into the new deployment.
+func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefinition, yamlDigest string) error {
 	manifestPath := filepath.Join(agentDir, "deploy-manifest.json")
 
-	m := deploymentManifest{RootAgentID: rootName, Artifacts: make(map[string]agentArtifacts, len(agents))}
+	m := deploymentManifest{RootAgentID: rootName, YAMLDigest: yamlDigest, Artifacts: make(map[string]agentArtifacts, len(agents))}
 	for _, a := range agents {
 		if len(a.Skills) == 0 && len(a.CustomTools) == 0 {
 			continue
@@ -277,10 +285,14 @@ func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefi
 }
 
 // loadDeploymentManifest merges the persisted artifact declarations into the
-// graph read from agents.yaml. A missing manifest (pre-manifest or hand-written
-// deployments) is not an error — artifacts stay empty; a corrupt manifest
-// fails explicitly because a silently lossy round trip is worse.
-func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph) error {
+// graph read from agents.yaml — but ONLY when the manifest's recorded
+// yamlDigest matches the agents.yaml actually being read (committed
+// generation). A mismatched manifest is an aborted-generation leftover and is
+// silently ignored: the interruption window fails toward "artifacts lost",
+// never "artifacts resurrected". A missing manifest (pre-manifest or
+// hand-written deployments) likewise reads back artifact-free; a corrupt
+// manifest fails explicitly because a silently lossy round trip is worse.
+func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph, yamlDigest string) error {
 	data, err := os.ReadFile(filepath.Join(s.dataDir, name, "agents", "deploy-manifest.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -292,6 +304,9 @@ func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph) er
 	if err := json.Unmarshal(data, &m); err != nil {
 		return fmt.Errorf("parse deploy-manifest: %w", err)
 	}
+	if m.YAMLDigest == "" || m.YAMLDigest != yamlDigest {
+		return nil
+	}
 	for i := range graph.Agents {
 		arts := m.Artifacts[graph.Agents[i].Name]
 		if arts.Skills != nil {
@@ -302,6 +317,11 @@ func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph) er
 		}
 	}
 	return nil
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // AgentGraph is the complete agent graph read back from agents.yaml.
@@ -360,7 +380,7 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 	if !foundRoot {
 		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
 	}
-	if err := s.loadDeploymentManifest(name, graph); err != nil {
+	if err := s.loadDeploymentManifest(name, graph, sha256Hex(data)); err != nil {
 		return nil, err
 	}
 	return graph, nil

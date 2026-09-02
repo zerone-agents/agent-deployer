@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -656,6 +657,27 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	assert.NotContains(t, childBDetail, "extraUserSkillDirs")
 }
 
+// containerReachableServer starts an httptest server bound to 0.0.0.0 and
+// returns it together with a URL the RUNTIME CONTAINER can reach. The deployer
+// creates containers on Docker's default bridge network; its gateway
+// (172.17.0.1 by default) routes from inside the container back to the host.
+// A host-loopback 127.0.0.1 URL would point at the container itself. Override
+// the gateway with CAM_INTEGRATION_DOCKER_GATEWAY on hosts whose default
+// bridge differs.
+func containerReachableServer(t *testing.T, h http.Handler) (*httptest.Server, string) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	require.NoError(t, err)
+	srv.Listener = ln
+	srv.Start()
+	gateway := os.Getenv("CAM_INTEGRATION_DOCKER_GATEWAY")
+	if gateway == "" {
+		gateway = "172.17.0.1"
+	}
+	return srv, strings.Replace(srv.URL, "127.0.0.1", gateway, 1)
+}
+
 // capturedLLMRequest records what the SDK's provider sent to the mock LLM.
 type capturedLLMRequest struct {
 	System string   // messages[0].content
@@ -681,11 +703,13 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 	requireDocker(t)
 
 	var mu sync.Mutex
-	parentTurns, childTurns := 0, 0
-	var parentReqs, childReqs []capturedLLMRequest
+	parentTurns, childTurns, childBTurns := 0, 0, 0
+	var parentReqs, childReqs, childBReqs []capturedLLMRequest
 
 	// ---- Mock LLM (openai-completions protocol) -------------------------
-	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Bound to 0.0.0.0 and addressed via the docker bridge gateway so the
+	// runtime container can actually reach it (host-loopback would not).
+	llmSrv, llmURL := containerReachableServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
 			http.NotFound(w, r)
 			return
@@ -719,10 +743,15 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		isChild := strings.Contains(captured.System, "research specialist")
-		if isChild {
+		isChildB := strings.Contains(captured.System, "review specialist")
+		switch {
+		case isChildB:
+			childBReqs = append(childBReqs, captured)
+			childBTurns++
+		case isChild:
 			childReqs = append(childReqs, captured)
 			childTurns++
-		} else {
+		default:
 			parentReqs = append(parentReqs, captured)
 			parentTurns++
 		}
@@ -756,6 +785,9 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 
 		var resp map[string]any
 		switch {
+		case isChildB:
+			// child-b declares nothing: answer immediately and terminate.
+			resp = final("child-b-done")
 		case isChild && childTurns == 1:
 			// Ask for BOTH the file tool and the MCP tool in one turn.
 			resp = map[string]any{
@@ -775,7 +807,12 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 		case isChild:
 			resp = final("child-a-done")
 		case parentTurns == 1:
-			resp = toolCall("call-task", "Task", `{"prompt":"do the research","description":"research","subagent_type":"General","subagent_name":"child-a"}`)
+			resp = toolCall("call-task-a", "Task", `{"prompt":"do the research","description":"research","subagent_type":"General","subagent_name":"child-a"}`)
+		case parentTurns == 2:
+			// Exercise the EMPTY-capability child through the mount path too
+			// (issue regression #8: child-b must not see parent/child-a
+			// capabilities).
+			resp = toolCall("call-task-b", "Task", `{"prompt":"do the review","description":"review","subagent_type":"General","subagent_name":"child-b"}`)
 		default:
 			resp = final("parent-final")
 		}
@@ -786,7 +823,7 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 
 	// ---- Mock MCP (streamable-http JSON-RPC) ----------------------------
 	mcpCalls := 0
-	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mcpSrv, mcpURL := containerReachableServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -901,7 +938,7 @@ export default {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/skill.zip", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(zipBytes) })
 	mux.HandleFunc("/child-tool.mjs", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(toolSrc)) })
-	artifacts := httptest.NewServer(mux)
+	artifacts, artifactsURL := containerReachableServer(t, mux)
 	t.Cleanup(artifacts.Close)
 
 	body, err := json.Marshal(model.CreateAgentRequest{
@@ -916,16 +953,16 @@ export default {
 				Name: "child-a", Description: "Research", SystemPrompt: "You are the research specialist.",
 				Tools: []string{"WebSearch"}, DisallowedTools: []string{"Bash"},
 				SettingSources: []string{"user"},
-				Skills:         []model.SkillSource{{Name: "iso-skill", URL: artifacts.URL + "/skill.zip", Hash: zipHash}},
-				CustomTools:    []model.ToolSource{{Name: "child-tool", URL: artifacts.URL + "/child-tool.mjs", Hash: toolHash, FileName: "child-tool.mjs"}},
+				Skills:         []model.SkillSource{{Name: "iso-skill", URL: artifactsURL + "/skill.zip", Hash: zipHash}},
+				CustomTools:    []model.ToolSource{{Name: "child-tool", URL: artifactsURL + "/child-tool.mjs", Hash: toolHash, FileName: "child-tool.mjs"}},
 				Datasets:       map[string]string{"knowledge-a": "The secret dataset for research"},
 				McpServers: map[string]model.McpServerConfig{
-					"knowledge": {Type: "http", URL: mcpSrv.URL + "/mcp"},
+					"knowledge": {Type: "http", URL: mcpURL + "/mcp"},
 				},
 			},
-			{Name: "child-b", Description: "Review", SystemPrompt: "Review"},
+			{Name: "child-b", Description: "Review", SystemPrompt: "You are the review specialist."},
 		},
-		Provider:     model.ProviderConfig{Protocol: "openai-completions", BaseURL: llmSrv.URL, APIKey: "mock-key"},
+		Provider:     model.ProviderConfig{Protocol: "openai-completions", BaseURL: llmURL, APIKey: "mock-key"},
 		RuntimeToken: "it-runtime-token",
 	})
 	require.NoError(t, err)
@@ -993,12 +1030,18 @@ export default {
 	require.NoError(t, rerr)
 	require.Equal(t, http.StatusOK, runResp.StatusCode, "run response: %s", string(runBytes))
 	var run struct {
-		State string `json:"state"`
-		Text  string `json:"text"`
+		RunID    string `json:"runId"`
+		Text     string `json:"text"`
+		NumTurns int    `json:"numTurns"`
+		State    string `json:"state"`
 	}
 	require.NoError(t, json.Unmarshal(runBytes, &run))
-	assert.Equal(t, "completed", run.State, "run body: %s", string(runBytes))
+	// Runtime v2.4.0's success schema is runId/sessionId/text/usage/numTurns/
+	// durationMs; the state field exists only on cancelled/failed responses.
+	assert.NotEmpty(t, run.RunID, "run body: %s", string(runBytes))
 	assert.Equal(t, "parent-final", run.Text)
+	assert.GreaterOrEqual(t, run.NumTurns, 1)
+	assert.Empty(t, run.State, "success responses carry no state field (cancelled/failed only)")
 
 	// ---- Assertions on the execution path --------------------------------
 	mu.Lock()
@@ -1043,4 +1086,29 @@ export default {
 	assert.NotContains(t, parentTools, "child-tool")
 	assert.NotContains(t, parentTools, "mcp__knowledge__lookup")
 	assert.Equal(t, "mock-model", parent1.Model)
+
+	// child-b was ALSO executed through the Task mount path with EMPTY
+	// capabilities (issue regression #8: child-b must not see parent or
+	// sibling capabilities; the standalone detail view alone cannot prove it).
+	require.NotEmpty(t, childBReqs, "child-b must also have been executed via Task")
+	childB1 := childBReqs[0]
+	assert.Contains(t, childB1.System, "review specialist")
+	assert.NotContains(t, childB1.System, "parent coordinator", "parent prompt must not leak into child-b")
+	assert.NotContains(t, childB1.System, "knowledge-a", "sibling datasets must not leak into child-b")
+	assert.NotContains(t, childB1.System, "iso-skill marker", "sibling skills must not leak into child-b")
+	childBTools := strings.Join(childB1.Tools, ",")
+	assert.NotContains(t, childBTools, "Task", "child-b mounts nothing")
+	assert.NotContains(t, childBTools, "child-tool", "sibling file tools must not leak into child-b")
+	assert.NotContains(t, childBTools, "mcp__knowledge__lookup", "sibling MCP tools must not leak into child-b")
+	// NOTE: WebSearch/Bash are SDK built-ins and legitimately appear in
+	// child-b's DEFAULT tool set (it declares no allowedTools and no
+	// disallowedTools); "empty declaration stays empty" governs mounted and
+	// declared capabilities, not the SDK default toolset.
+	assert.Equal(t, "mock-model", childB1.Model)
+
+	// The parent's final turn carries BOTH children's Task results.
+	require.GreaterOrEqual(t, len(parentReqs), 3, "parent must run child-a, child-b, then finalize")
+	lastParentRaw := string(parentReqs[len(parentReqs)-1].Raw)
+	assert.Contains(t, lastParentRaw, "child-a-done", "Task(child-a) result must reach the parent")
+	assert.Contains(t, lastParentRaw, "child-b-done", "Task(child-b) result must reach the parent")
 }
