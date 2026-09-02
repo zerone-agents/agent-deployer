@@ -1020,3 +1020,79 @@ func TestCreateAgent_AcceptsMaxSessionQueries(t *testing.T) {
 	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
 	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
 }
+
+// TestCreateAgent_DeploymentKeyCarriedInResponse pins the issue #18 wire
+// contract at the HTTP layer: a tenant-scoped deployment key and a bare
+// rootAgentId both flow through Create, the response echoes both identities,
+// and the container name derives from the deployment key.
+func TestCreateAgent_DeploymentKeyCarriedInResponse(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID:   "coder",
+		DeploymentKey: "acme-coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-test",
+		},
+		RuntimeToken: "test-runtime-token",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			AgentName     string `json:"agentName"`
+			DeploymentKey string `json:"deploymentKey"`
+			ContainerName string `json:"containerName"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp.Success)
+	assert.Equal(t, "coder", resp.Data.AgentName,
+		"agentName is the bare runtime root id")
+	assert.Equal(t, "acme-coder", resp.Data.DeploymentKey,
+		"deploymentKey is the tenant-scoped infra key")
+	assert.Contains(t, resp.Data.ContainerName, "cloud-agent-acme-coder-",
+		"container name derives from the deployment key")
+
+	// Lifecycle lookups are keyed by the deployment key.
+	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/acme-coder", nil)
+	assert.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/coder", nil)
+	assert.Equal(t, http.StatusNotFound, w.Code,
+		"the bare root id is not a lookup key; only the deployment key is")
+}
+
+// TestCreateAgent_MissingDeploymentKey_Rejected400 pins the issue #18
+// compatibility boundary: a pre-split client that does not send
+// deploymentKey gets an explicit validation error — never a silent fallback
+// to rootAgentId (which would reintroduce cross-tenant same-name collisions).
+func TestCreateAgent_MissingDeploymentKey_Rejected400(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body, err := json.Marshal(map[string]any{
+		"rootAgentId": "coder",
+		"agents": []map[string]any{
+			{"name": "coder", "description": "d", "model": "m", "systemPrompt": "p"},
+		},
+		"provider":      map[string]any{"protocol": "anthropic-messages", "baseUrl": "https://x", "lockedApiKey": "k"},
+		"runtime_token": "t",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "deploymentKey is required",
+		"the 400 must name the missing field so pre-split clients can migrate")
+}
