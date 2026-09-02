@@ -95,6 +95,12 @@ type runtimeAgentsYAML struct {
 	Aigc   *runtimeAigcSection `yaml:"aigc,omitempty"`
 	Hub    *runtimeHubSection  `yaml:"hub,omitempty"`
 	Agents []runtimeAgentEntry `yaml:"agents"`
+	// XDeployerManifest embeds the deployer-private artifact declarations
+	// (Skill/Tool url+hash) in the SAME authoritative file. The runtime's
+	// zod schema strips unknown top-level keys, so this section is invisible
+	// to the runtime while making the write a single atomic file replacement
+	// (fourth review round: one authoritative persisted document).
+	XDeployerManifest map[string]agentArtifacts `yaml:"x-deployer-manifest,omitempty"`
 }
 
 // WriteAgentYAML writes the complete agent graph to
@@ -172,6 +178,20 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 
 	doc := runtimeAgentsYAML{Agents: entries}
 
+	// Embed the artifact declarations that the runtime schema cannot express.
+	// Keeping them in the SAME file is what makes the update transactional:
+	// one document, one atomic rename, no cross-file window.
+	embedded := make(map[string]agentArtifacts, len(agents))
+	for _, a := range agents {
+		if len(a.Skills) == 0 && len(a.CustomTools) == 0 {
+			continue
+		}
+		embedded[a.Name] = agentArtifacts{Skills: a.Skills, CustomTools: a.CustomTools}
+	}
+	if len(embedded) > 0 {
+		doc.XDeployerManifest = embedded
+	}
+
 	if aigc != nil && aigc.Enabled {
 		hint := aigc.ExplicitHint
 		if hint == nil {
@@ -208,17 +228,17 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("create agent directory: %w", err)
 	}
 
-	// Write order (review finding): manifest FIRST, agents.yaml second — both
-	// via staged tmp + atomic rename, with the manifest bound to the NEW
-	// YAML's digest. Any interruption window therefore pairs a new manifest
-	// with an old YAML whose digest does not match: read-back ignores the
-	// manifest entirely (artifacts lost, never resurrected into the old
-	// graph), and a manifest write failure leaves the previous deployment
-	// fully intact.
-	if err := writeDeploymentManifest(agentDir, rootName, agents, sha256Hex(data)); err != nil {
+	// Migrate away any legacy sidecar from pre-embedded-section deployments;
+	// the embedded section above supersedes it, and read-back must never mix
+	// the two representations.
+	if err := removeLegacyManifest(agentDir); err != nil {
 		return err
 	}
 
+	// agents.yaml is the SINGLE authoritative document (graph + artifact
+	// declarations): staged tmp + atomic rename. A failed or interrupted
+	// update leaves the previous deployment fully intact and losslessly
+	// readable — no separate manifest file can get out of sync.
 	yamlTmp := filepath.Join(agentDir, "agents.yaml.tmp")
 	if err := os.WriteFile(yamlTmp, data, 0644); err != nil {
 		return fmt.Errorf("write agent YAML: %w", err)
@@ -230,14 +250,24 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	return nil
 }
 
-// deploymentManifest is the deployer-private sidecar persisting the artifact
-// declarations the runtime agents.yaml cannot express (SkillSource/ToolSource
-// url + hash). YAMLDigest binds the manifest to the exact agents.yaml
-// generation it was written for: ReadAgentYAML merges artifacts ONLY on a
-// digest match, so a manifest left over from an aborted generation (new
-// manifest + old YAML, same agent ids) is ignored instead of polluting the
-// old graph — every interruption window degrades to "artifacts lost", never
-// "artifacts resurrected" (issue #16, third review round).
+// removeLegacyManifest deletes the deploy-manifest.json sidecar written by
+// pre-embedded-section deployer versions. New deployments embed artifact
+// declarations inside agents.yaml; leftover sidecars are migrated away on the
+// next write so read-back never mixes representations.
+func removeLegacyManifest(agentDir string) error {
+	if err := os.Remove(filepath.Join(agentDir, "deploy-manifest.json")); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove legacy deploy manifest: %w", err)
+	}
+	return nil
+}
+
+// deploymentManifest is the LEGACY sidecar format written by deployer
+// versions before artifact declarations were embedded in agents.yaml's
+// x-deployer-manifest section. It is kept read-only for compatibility:
+// YAMLDigest binds it to the exact agents.yaml generation it was written
+// for, and ReadAgentYAML merges its artifacts only on a digest match — a
+// leftover from an aborted generation is ignored instead of polluting the
+// current graph. New writes embed the section and remove the sidecar.
 type deploymentManifest struct {
 	RootAgentID string                    `json:"rootAgentId"`
 	YAMLDigest  string                    `json:"yamlDigest"`
@@ -245,43 +275,8 @@ type deploymentManifest struct {
 }
 
 type agentArtifacts struct {
-	Skills      []model.SkillSource `json:"skills,omitempty"`
-	CustomTools []model.ToolSource  `json:"customTools,omitempty"`
-}
-
-// writeDeploymentManifest stores the per-agent artifact declarations next to
-// agents.yaml (staged tmp + atomic rename), bound to yamlDigest — the sha256
-// of the agents.yaml bytes written in the SAME deployment. An artifact-FREE
-// graph REMOVES a previous manifest — otherwise ReadAgentYAML would resurrect
-// the removed capabilities into the new deployment.
-func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefinition, yamlDigest string) error {
-	manifestPath := filepath.Join(agentDir, "deploy-manifest.json")
-
-	m := deploymentManifest{RootAgentID: rootName, YAMLDigest: yamlDigest, Artifacts: make(map[string]agentArtifacts, len(agents))}
-	for _, a := range agents {
-		if len(a.Skills) == 0 && len(a.CustomTools) == 0 {
-			continue
-		}
-		m.Artifacts[a.Name] = agentArtifacts{Skills: a.Skills, CustomTools: a.CustomTools}
-	}
-	if len(m.Artifacts) == 0 {
-		if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove stale deploy manifest: %w", err)
-		}
-		return nil
-	}
-	data, err := json.Marshal(&m)
-	if err != nil {
-		return fmt.Errorf("marshal deploy manifest: %w", err)
-	}
-	tmp := manifestPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return fmt.Errorf("write deploy-manifest: %w", err)
-	}
-	if err := os.Rename(tmp, manifestPath); err != nil {
-		return fmt.Errorf("replace deploy-manifest: %w", err)
-	}
-	return nil
+	Skills      []model.SkillSource `yaml:"skills,omitempty" json:"skills,omitempty"`
+	CustomTools []model.ToolSource  `yaml:"customTools,omitempty" json:"customTools,omitempty"`
 }
 
 // loadDeploymentManifest merges the persisted artifact declarations into the
@@ -379,6 +374,22 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 	}
 	if !foundRoot {
 		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
+	}
+	// Artifact declarations: prefer the embedded x-deployer-manifest section —
+	// same file, same generation, atomic by construction. Deployments written
+	// before the section existed fall back to the legacy sidecar, merged only
+	// on a digest match.
+	if len(doc.XDeployerManifest) > 0 {
+		for i := range graph.Agents {
+			arts := doc.XDeployerManifest[graph.Agents[i].Name]
+			if arts.Skills != nil {
+				graph.Agents[i].Skills = arts.Skills
+			}
+			if arts.CustomTools != nil {
+				graph.Agents[i].CustomTools = arts.CustomTools
+			}
+		}
+		return graph, nil
 	}
 	if err := s.loadDeploymentManifest(name, graph, sha256Hex(data)); err != nil {
 		return nil, err

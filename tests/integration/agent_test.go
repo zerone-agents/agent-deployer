@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -512,11 +513,13 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	})
 
 	// In-process artifact server: child-a's skill zip + custom tool file.
+	// The SKILL.md carries the frontmatter the SDK parser requires
+	// (description is mandatory; without it the skill is never registered).
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
 	f, err := zw.Create("SKILL.md")
 	require.NoError(t, err)
-	_, err = f.Write([]byte("# isolation skill\n"))
+	_, err = f.Write([]byte("---\ndescription: Deterministic isolation marker skill\n---\n# isolation skill\n"))
 	require.NoError(t, err)
 	require.NoError(t, zw.Close())
 	zipBytes := zipBuf.Bytes()
@@ -661,9 +664,10 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 // returns it together with a URL the RUNTIME CONTAINER can reach. The deployer
 // creates containers on Docker's default bridge network; its gateway
 // (172.17.0.1 by default) routes from inside the container back to the host.
-// A host-loopback 127.0.0.1 URL would point at the container itself. Override
-// the gateway with CAM_INTEGRATION_DOCKER_GATEWAY on hosts whose default
-// bridge differs.
+// The URL is built from the gateway + the listener's actual port: after
+// swapping in a 0.0.0.0 listener, srv.URL itself is http://[::]:<port> (or
+// 0.0.0.0), which is NOT container-reachable. Override the gateway with
+// CAM_INTEGRATION_DOCKER_GATEWAY on hosts whose default bridge differs.
 func containerReachableServer(t *testing.T, h http.Handler) (*httptest.Server, string) {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(h)
@@ -675,7 +679,9 @@ func containerReachableServer(t *testing.T, h http.Handler) (*httptest.Server, s
 	if gateway == "" {
 		gateway = "172.17.0.1"
 	}
-	return srv, strings.Replace(srv.URL, "127.0.0.1", gateway, 1)
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	require.NoError(t, err)
+	return srv, "http://" + net.JoinHostPort(gateway, port)
 }
 
 // capturedLLMRequest records what the SDK's provider sent to the mock LLM.
@@ -703,7 +709,7 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 	requireDocker(t)
 
 	var mu sync.Mutex
-	parentTurns, childTurns, childBTurns := 0, 0, 0
+	parentTurns, childTurns := 0, 0
 	var parentReqs, childReqs, childBReqs []capturedLLMRequest
 
 	// ---- Mock LLM (openai-completions protocol) -------------------------
@@ -747,7 +753,6 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 		switch {
 		case isChildB:
 			childBReqs = append(childBReqs, captured)
-			childBTurns++
 		case isChild:
 			childReqs = append(childReqs, captured)
 			childTurns++
@@ -912,12 +917,15 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 		_ = svc.Delete(ctx, "parent", true)
 	})
 
-	// Skill zip with a distinctive, assertable marker line.
+	// Skill zip with a distinctive, assertable marker. The frontmatter
+	// description is REQUIRED by the SDK parser (skills/yaml.ts): a bare
+	// markdown body is rejected and never registered, which would silently
+	// invalidate the isolation assertions below.
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
 	f, err := zw.Create("SKILL.md")
 	require.NoError(t, err)
-	_, err = f.Write([]byte("# iso-skill marker\n"))
+	_, err = f.Write([]byte("---\ndescription: Deterministic isolation marker skill\n---\n# iso-skill marker\n"))
 	require.NoError(t, err)
 	require.NoError(t, zw.Close())
 	zipBytes := zipBuf.Bytes()
@@ -940,6 +948,19 @@ export default {
 	mux.HandleFunc("/child-tool.mjs", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(toolSrc)) })
 	artifacts, artifactsURL := containerReachableServer(t, mux)
 	t.Cleanup(artifacts.Close)
+
+	// Focused guard: the advertised fixture hosts must equal the configured
+	// bridge gateway — a regression here silently hands the runtime an
+	// unreachable [::]/0.0.0.0 address again.
+	expectedGateway := os.Getenv("CAM_INTEGRATION_DOCKER_GATEWAY")
+	if expectedGateway == "" {
+		expectedGateway = "172.17.0.1"
+	}
+	for _, u := range []string{llmURL, mcpURL, artifactsURL} {
+		parsed, perr := url.Parse(u)
+		require.NoError(t, perr)
+		assert.Equal(t, expectedGateway, parsed.Hostname(), "fixture URL must advertise the bridge gateway: %s", u)
+	}
 
 	body, err := json.Marshal(model.CreateAgentRequest{
 		RootAgentID: "parent",
@@ -1054,7 +1075,7 @@ export default {
 	child1 := childReqs[0]
 	assert.Contains(t, child1.System, "research specialist")
 	assert.Contains(t, child1.System, "knowledge-a", "child datasets must be injected")
-	assert.Contains(t, child1.System, "iso-skill marker", "child skills must be visible in the prompt")
+	assert.Contains(t, child1.System, "isolation marker", "child skills must be visible in the prompt (description)")
 	assert.NotContains(t, child1.System, "parent coordinator")
 
 	// Child-a tool boundary: own file tool + own MCP tool + allowed tool;
@@ -1080,7 +1101,7 @@ export default {
 	parent1 := parentReqs[0]
 	assert.Contains(t, parent1.System, "parent coordinator")
 	assert.NotContains(t, parent1.System, "knowledge-a")
-	assert.NotContains(t, parent1.System, "iso-skill marker")
+	assert.NotContains(t, parent1.System, "iso-skill", "child skill must not leak into the parent prompt")
 	parentTools := strings.Join(parent1.Tools, ",")
 	assert.Contains(t, parentTools, "Task")
 	assert.NotContains(t, parentTools, "child-tool")
@@ -1095,7 +1116,7 @@ export default {
 	assert.Contains(t, childB1.System, "review specialist")
 	assert.NotContains(t, childB1.System, "parent coordinator", "parent prompt must not leak into child-b")
 	assert.NotContains(t, childB1.System, "knowledge-a", "sibling datasets must not leak into child-b")
-	assert.NotContains(t, childB1.System, "iso-skill marker", "sibling skills must not leak into child-b")
+	assert.NotContains(t, childB1.System, "iso-skill", "sibling skills must not leak into child-b")
 	childBTools := strings.Join(childB1.Tools, ",")
 	assert.NotContains(t, childBTools, "Task", "child-b mounts nothing")
 	assert.NotContains(t, childBTools, "child-tool", "sibling file tools must not leak into child-b")

@@ -1228,9 +1228,10 @@ func TestWriteAgentYAML_RejectsNameMismatch(t *testing.T) {
 }
 
 // TestReadAgentYAML_ManifestRestoresArtifactMetadata guards the lossless
-// round-trip contract (issue #16 review): Skills/CustomTools url+hash
-// metadata cannot live in the runtime agents.yaml, so a deployment manifest
-// sidecar persists them and ReadAgentYAML merges them back.
+// round-trip contract (issue #16, fourth review round): artifact
+// declarations (Skill/Tool url+hash) live in the x-deployer-manifest
+// section EMBEDDED in agents.yaml — one authoritative file, replaced
+// atomically, so read-back is lossless by construction.
 func TestReadAgentYAML_ManifestRestoresArtifactMetadata(t *testing.T) {
 	dir := t.TempDir()
 	store := NewAgentStorage(dir)
@@ -1259,8 +1260,11 @@ func TestReadAgentYAML_ManifestRestoresArtifactMetadata(t *testing.T) {
 	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil,
 		map[string][]string{"parent": {"./tools/root-tool.mjs"}, "child-a": {"./tools/child-tool.mjs"}}))
 
-	// The manifest sidecar exists next to agents.yaml.
-	assert.FileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
+	// The embedded section lives in agents.yaml; no sidecar is written.
+	yamlBytes, err := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(yamlBytes), "x-deployer-manifest")
+	assert.NoFileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
 
 	graph, err := store.ReadAgentYAML("parent")
 	require.NoError(t, err)
@@ -1287,10 +1291,10 @@ func TestReadAgentYAML_ManifestRestoresArtifactMetadata(t *testing.T) {
 	assert.Equal(t, agents[1].CustomTools[0], child.CustomTools[0])
 }
 
-// TestReadAgentYAML_NoManifestDegradesToYAML keeps hand-written or
+// TestReadAgentYAML_NoEmbeddedSectionDegradesToYAML keeps hand-written or
 // pre-manifest deployments readable: artifacts come back empty instead of
 // failing the whole read.
-func TestReadAgentYAML_NoManifestDegradesToYAML(t *testing.T) {
+func TestReadAgentYAML_NoEmbeddedSectionDegradesToYAML(t *testing.T) {
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, "legacy", "agents")
 	require.NoError(t, os.MkdirAll(agentDir, 0755))
@@ -1304,10 +1308,10 @@ func TestReadAgentYAML_NoManifestDegradesToYAML(t *testing.T) {
 	assert.Empty(t, graph.Agents[0].CustomTools)
 }
 
-// TestReadAgentYAML_CorruptManifestFailsExplicitly refuses to silently
-// degrade when the manifest exists but cannot be parsed: a lossy round trip
-// is worse than an explicit error.
-func TestReadAgentYAML_CorruptManifestFailsExplicitly(t *testing.T) {
+// TestReadAgentYAML_CorruptLegacyManifestFailsExplicitly covers the legacy
+// sidecar compatibility path: a pre-embedded-section deployment with a
+// corrupt sidecar fails explicitly rather than silently degrading.
+func TestReadAgentYAML_CorruptLegacyManifestFailsExplicitly(t *testing.T) {
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, "broken", "agents")
 	require.NoError(t, os.MkdirAll(agentDir, 0755))
@@ -1319,13 +1323,15 @@ func TestReadAgentYAML_CorruptManifestFailsExplicitly(t *testing.T) {
 	assert.Contains(t, err.Error(), "deploy-manifest")
 }
 
-// TestWriteAgentYAML_ArtifactFreeRedeployRemovesStaleManifest guards the
-// review finding: a redeploy whose graph declares NO artifacts must delete
-// the previous manifest — otherwise ReadAgentYAML would resurrect the removed
-// Skills/CustomTools into the new deployment.
-func TestWriteAgentYAML_ArtifactFreeRedeployRemovesStaleManifest(t *testing.T) {
+// TestWriteAgentYAML_ArtifactFreeRedeployDropsEmbeddedSection guards
+// against stale-capability resurrection: a redeploy whose graph declares NO
+// artifacts omits the embedded section entirely (single-file replacement —
+// nothing from the previous deployment survives), and a leftover legacy
+// sidecar is migrated away.
+func TestWriteAgentYAML_ArtifactFreeRedeployDropsEmbeddedSection(t *testing.T) {
 	dir := t.TempDir()
 	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
 
 	withArtifacts := []model.AgentDefinition{
 		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "s", Subagents: []string{"child-a"}},
@@ -1335,19 +1341,23 @@ func TestWriteAgentYAML_ArtifactFreeRedeployRemovesStaleManifest(t *testing.T) {
 			CustomTools: []model.ToolSource{{Name: "old-tool", URL: "https://example.com/o.mjs", Hash: strings.Repeat("b", 64), FileName: "o.mjs"}},
 		},
 	}
-	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
 	require.NoError(t, store.WriteAgentYAML("parent", withArtifacts, provider, nil, nil, nil))
-	assert.FileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
 
-	// Redeploy the same root with every artifact removed.
+	// Plant a legacy sidecar to prove it is migrated away on redeploy.
+	agentDir := filepath.Join(dir, "parent", "agents")
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json"), []byte(`{"rootAgentId":"parent","artifacts":{}}`), 0644))
+
 	withoutArtifacts := []model.AgentDefinition{
 		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2", Subagents: []string{"child-a"}},
 		{Name: "child-a", Description: "c2"},
 	}
 	require.NoError(t, store.WriteAgentYAML("parent", withoutArtifacts, provider, nil, nil, nil))
 
-	// The stale manifest is gone AND read-back reports no capabilities.
-	assert.NoFileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
+	yamlBytes, err := os.ReadFile(filepath.Join(agentDir, "agents.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(yamlBytes), "x-deployer-manifest", "artifact-free graph must not carry an embedded section")
+	assert.NoFileExists(t, filepath.Join(agentDir, "deploy-manifest.json"), "legacy sidecar must be migrated away")
+
 	graph, err := store.ReadAgentYAML("parent")
 	require.NoError(t, err)
 	for _, a := range graph.Agents {
@@ -1356,9 +1366,9 @@ func TestWriteAgentYAML_ArtifactFreeRedeployRemovesStaleManifest(t *testing.T) {
 	}
 }
 
-// TestWriteAgentYAML_RedeployReplacesManifestContent keeps a redeploy with
-// DIFFERENT artifacts from merging stale and fresh declarations.
-func TestWriteAgentYAML_RedeployReplacesManifestContent(t *testing.T) {
+// TestWriteAgentYAML_RedeployReplacesEmbeddedDeclarations keeps a redeploy
+// with DIFFERENT artifacts from merging stale and fresh declarations.
+func TestWriteAgentYAML_RedeployReplacesEmbeddedDeclarations(t *testing.T) {
 	dir := t.TempDir()
 	store := NewAgentStorage(dir)
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
@@ -1391,11 +1401,12 @@ func TestWriteAgentYAML_RedeployReplacesManifestContent(t *testing.T) {
 	assert.Equal(t, "skill-two", child.Skills[0].Name, "redeploy must replace, not merge, artifact declarations")
 }
 
-// TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment guards the
-// write ordering (manifest first, agents.yaml second): when the manifest
-// cannot be replaced, the previous deployment stays fully intact instead of
-// ending up with a new YAML paired with a stale manifest.
-func TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment(t *testing.T) {
+// TestWriteAgentYAML_StageFailurePreservesPreviousDeployment is the
+// transactional guarantee the fourth review round asked for: agents.yaml is
+// the SINGLE authoritative file (artifacts embedded), staged via tmp +
+// atomic rename. A staging failure leaves the previous deployment — graph
+// AND artifact declarations — fully intact and losslessly readable.
+func TestWriteAgentYAML_StageFailurePreservesPreviousDeployment(t *testing.T) {
 	dir := t.TempDir()
 	store := NewAgentStorage(dir)
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
@@ -1407,14 +1418,10 @@ func TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment(t *testing.T
 	}
 	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
 
-	// Block BOTH the manifest replacement and the YAML replacement: a
-	// directory squatting on deploy-manifest.json makes the staged rename
-	// fail before agents.yaml is touched.
-	require.NoError(t, os.Remove(filepath.Join(dir, "parent", "agents", "deploy-manifest.json")))
-	require.NoError(t, os.Mkdir(filepath.Join(dir, "parent", "agents", "deploy-manifest.json"), 0755))
+	// Squat the staging path: the second write fails BEFORE agents.yaml is
+	// touched — there is no separate manifest file to get out of sync.
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "parent", "agents", "agents.yaml.tmp"), 0755))
 
-	// The redeploy still DECLARES an artifact, so the manifest must be
-	// replaced (tmp + rename) — the rename onto the squatted directory fails.
 	second := []model.AgentDefinition{
 		{Name: "parent", Description: "second", Model: "m", SystemPrompt: "s2"},
 		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
@@ -1422,98 +1429,53 @@ func TestWriteAgentYAML_ManifestWriteFailureKeepsPreviousDeployment(t *testing.T
 	}
 	err := store.WriteAgentYAML("parent", second, provider, nil, nil, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "deploy-manifest")
-
-	// The previous deployment is untouched: agents.yaml still describes the
-	// first graph. (Assert on the file directly — the squatted directory is
-	// deliberate disk corruption, under which read-back is expected to fail
-	// explicitly, a semantic covered by the corrupt-manifest test above.)
-	yamlBytes, rerr := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
-	require.NoError(t, rerr)
-	assert.Contains(t, string(yamlBytes), "first",
-		"manifest write failure must not touch the previous agents.yaml")
-}
-
-// TestReadAgentYAML_GenerationMismatchedManifestIgnored guards the
-// transactional read rule (third review round): the manifest is only merged
-// when its recorded yamlDigest matches the agents.yaml actually being read.
-// A manifest from an aborted generation (new manifest + old YAML) must be
-// ignored instead of merging its artifacts into the old graph.
-func TestReadAgentYAML_GenerationMismatchedManifestIgnored(t *testing.T) {
-	dir := t.TempDir()
-	store := NewAgentStorage(dir)
-	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
-
-	agents := []model.AgentDefinition{
-		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "s"},
-		{Name: "child-a", Description: "c", SettingSources: []string{"user"},
-			Skills: []model.SkillSource{{Name: "skill-one", URL: "https://example.com/1.zip", Hash: strings.Repeat("a", 64)}}},
-	}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
-
-	// Simulate the interrupted-generation window: the manifest was replaced
-	// for a NEW deployment (different YAML), but agents.yaml stayed old.
-	manifestPath := filepath.Join(dir, "parent", "agents", "deploy-manifest.json")
-	raw, err := os.ReadFile(manifestPath)
-	require.NoError(t, err)
-	var tampered struct {
-		RootAgentID string `json:"rootAgentId"`
-		YAMLDigest  string `json:"yamlDigest"`
-		Artifacts   map[string]struct {
-			Skills []model.SkillSource `json:"skills"`
-		} `json:"artifacts"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &tampered))
-	tampered.YAMLDigest = strings.Repeat("0", 64) // digest of a YAML that never landed
-	out, err := json.Marshal(&tampered)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(manifestPath, out, 0644))
-
-	graph, err := store.ReadAgentYAML("parent")
-	require.NoError(t, err)
-	for _, a := range graph.Agents {
-		assert.Empty(t, a.Skills,
-			"agent %s: artifacts from a mismatched manifest generation must not be merged", a.Name)
-	}
-}
-
-// TestWriteAgentYAML_YamlStageFailureAfterManifestReplace covers the window
-// AFTER the manifest replacement: the second deployment's YAML staging fails,
-// leaving old YAML + new manifest on disk. ReadAgentYAML must report the OLD
-// graph without resurrecting the new deployment's artifacts.
-func TestWriteAgentYAML_YamlStageFailureAfterManifestReplace(t *testing.T) {
-	dir := t.TempDir()
-	store := NewAgentStorage(dir)
-	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
-
-	first := []model.AgentDefinition{
-		{Name: "parent", Description: "first", Model: "m", SystemPrompt: "s"},
-	}
-	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
-
-	// Squat the YAML staging path: the second write replaces the manifest
-	// successfully, then fails staging agents.yaml.tmp.
-	require.NoError(t, os.Mkdir(filepath.Join(dir, "parent", "agents", "agents.yaml.tmp"), 0755))
-
-	second := []model.AgentDefinition{
-		{Name: "parent", Description: "second", Model: "m", SystemPrompt: "s2",
-			SettingSources: []string{"user"},
-			Skills:         []model.SkillSource{{Name: "new-skill", URL: "https://example.com/n.zip", Hash: strings.Repeat("c", 64)}}},
-	}
-	err := store.WriteAgentYAML("parent", second, provider, nil, nil, nil)
-	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent YAML")
 
-	// The manifest on disk is already the SECOND generation...
-	manifestRaw, rerr := os.ReadFile(filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
-	require.NoError(t, rerr)
-	assert.Contains(t, string(manifestRaw), "new-skill", "precondition: manifest was replaced first")
-
-	// ...but read-back reports the OLD graph with NO resurrected artifacts.
+	// The previous deployment reads back COMPLETELY intact: the old graph
+	// with its own artifact declarations — no loss, no resurrection.
 	graph, rerr := store.ReadAgentYAML("parent")
 	require.NoError(t, rerr)
-	require.Len(t, graph.Agents, 1)
+	require.Len(t, graph.Agents, 2)
 	assert.Equal(t, "first", graph.Agents[0].Description)
+	var child *model.AgentDefinition
+	for i := range graph.Agents {
+		if graph.Agents[i].Name == "child-a" {
+			child = &graph.Agents[i]
+		}
+	}
+	require.NotNil(t, child)
+	require.Len(t, child.Skills, 1)
+	assert.Equal(t, "skill-one", child.Skills[0].Name,
+		"the previous deployment's artifact declarations must survive a failed update losslessly")
+}
+
+// TestReadAgentYAML_LegacySidecarGenerationMismatchIgnored covers the
+// legacy sidecar compatibility path (pre-embedded-section deployments):
+// artifacts are merged only when the sidecar's yamlDigest matches the
+// agents.yaml actually being read; a mismatched leftover is ignored.
+func TestReadAgentYAML_LegacySidecarGenerationMismatchIgnored(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "parent", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	yamlBytes := []byte("agents:\n  - id: parent\n    description: d\n    systemPrompt: s\n")
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), yamlBytes, 0644))
+
+	legacy := map[string]any{
+		"rootAgentID": "parent",
+		"yamlDigest":  strings.Repeat("0", 64), // digest of a YAML that never landed
+		"artifacts": map[string]any{
+			"parent": map[string]any{
+				"skills": []any{map[string]any{"name": "ghost-skill", "url": "https://example.com/g.zip", "hash": strings.Repeat("e", 64)}},
+			},
+		},
+	}
+	out, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json"), out, 0644))
+
+	graph, rerr := NewAgentStorage(dir).ReadAgentYAML("parent")
+	require.NoError(t, rerr)
+	require.Len(t, graph.Agents, 1)
 	assert.Empty(t, graph.Agents[0].Skills,
-		"the new generation's artifacts must not be merged into the old YAML")
+		"artifacts from a mismatched legacy manifest generation must not be merged")
 }
