@@ -213,6 +213,8 @@ At create time, `provider` credentials and the root's `model` are written into t
 
 The only `ZERONE_AGENT_*` environment variable injected into the container is `ZERONE_AGENT_HTTP_API_KEY` (from the request's `runtime_token`), used for the runtime's own HTTP API auth — unrelated to model credentials. The `runtime_token` is supplied by the caller in the Create request; the deployer does NOT generate or persist it, so clients must manage and rotate it themselves.
 
+System prompts are externalized for readability: each agent's `systemPrompt` is staged as `agents/<name>/agents/prompts/<id>-<sha8>.md` (next to `agents.yaml`, inside the same bind mount), and the YAML entry references it via `systemPromptFile` (relative to the config dir, runtime v2.5.0) — long prompts never sit inline in `agents.yaml`. Read-back resolves the file back into the response's `systemPrompt` text, so the API shape is unchanged.
+
 ## Skills
 
 Each agent's `skills` and `settingSources` work together:

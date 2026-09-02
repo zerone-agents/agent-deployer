@@ -64,7 +64,14 @@ func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
 	assert.Equal(t, "reviewer", sub["id"])
 	assert.Equal(t, "reviewer", sub["name"])
 	assert.Equal(t, "Review code", sub["description"])
-	assert.Equal(t, "You are a code reviewer.", sub["systemPrompt"])
+	spf, isSpf := sub["systemPromptFile"].(string)
+	require.True(t, isSpf, "systemPrompt must externalize to a systemPromptFile reference")
+	assert.True(t, strings.HasPrefix(spf, "./prompts/reviewer-"), "prompt file lives under prompts/: %q", spf)
+	_, inline := sub["systemPrompt"]
+	assert.False(t, inline, "externalized prompt must not be inlined in the YAML")
+	promptBytes, perr := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", filepath.FromSlash(strings.TrimPrefix(spf, "./"))))
+	require.NoError(t, perr)
+	assert.Equal(t, "You are a code reviewer.", string(promptBytes))
 	assert.Equal(t, []interface{}{"Read"}, sub["allowedTools"])
 	assert.Equal(t, 10, sub["maxTurns"])
 	_, hasModel := sub["model"]
@@ -263,7 +270,11 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 	assert.Equal(t, "coder", entry["id"])
 	assert.Equal(t, "coder", entry["name"])
 	assert.Equal(t, "claude-sonnet-4-6", entry["model"])
-	assert.Equal(t, "You are a coding assistant.", entry["systemPrompt"])
+	spfMain, isSpfMain := entry["systemPromptFile"].(string)
+	require.True(t, isSpfMain, "systemPrompt must externalize to a systemPromptFile reference")
+	assert.True(t, strings.HasPrefix(spfMain, "./prompts/coder-"), "prompt file lives under prompts/: %q", spfMain)
+	_, inlineMain := entry["systemPrompt"]
+	assert.False(t, inlineMain, "externalized prompt must not be inlined in the YAML")
 	assert.Equal(t, "auto", entry["permissionMode"])
 	assert.Equal(t, []interface{}{"Read", "Write"}, entry["allowedTools"])
 	_, hasSkills := entry["skills"]
@@ -281,7 +292,11 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "reviewer", reviewer["id"])
 	assert.Equal(t, "Review code", reviewer["description"])
-	assert.Equal(t, "You are a code reviewer.", reviewer["systemPrompt"])
+	spfRev, isSpfRev := reviewer["systemPromptFile"].(string)
+	require.True(t, isSpfRev, "systemPrompt must externalize to a systemPromptFile reference")
+	assert.True(t, strings.HasPrefix(spfRev, "./prompts/reviewer-"), "prompt file lives under prompts/: %q", spfRev)
+	_, inlineRev := reviewer["systemPrompt"]
+	assert.False(t, inlineRev, "externalized prompt must not be inlined in the YAML")
 	assert.Equal(t, []interface{}{"Read"}, reviewer["allowedTools"])
 	assert.Equal(t, 10, reviewer["maxTurns"])
 }
@@ -897,7 +912,7 @@ func TestWriteAgentYAML_CredentialFieldOrder(t *testing.T) {
 	// yaml.v3 emits struct fields in declaration order; guard that the
 	// credential fields sit right after model (mirroring the runtime's own
 	// docs example: id, description, model, apiType, baseURL, apiKey, ...).
-	order := []string{"model:", "apiType:", "baseURL:", "apiKey:", "systemPrompt:"}
+	order := []string{"model:", "apiType:", "baseURL:", "apiKey:", "systemPromptFile:"}
 	prev := -1
 	for _, key := range order {
 		idx := strings.Index(text, key)
@@ -1579,4 +1594,121 @@ func TestWriteAgentYAML_LegacySidecarCleanupFailureIsDeferred(t *testing.T) {
 	require.NotNil(t, child)
 	require.Len(t, child.Skills, 1)
 	assert.Equal(t, "new-skill", child.Skills[0].Name)
+}
+
+// TestWriteAgentYAML_SystemPromptExternalized covers the default
+// systemPromptFile externalization (issue #17 follow-up): long prompts are
+// staged into prompts/<id>-<sha8>.md and the YAML entry only carries a
+// relative reference; agents without a prompt write nothing.
+func TestWriteAgentYAML_SystemPromptExternalized(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "You are the parent agent.", Subagents: []string{"child-a"}},
+		{Name: "child-a", Description: "c", SystemPrompt: "You are the child agent."},
+		{Name: "child-b", Description: "empty"}, // no prompt
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, model.ProviderConfig{}, nil, nil, nil))
+
+	agentDir := filepath.Join(dir, "parent", "agents")
+	yamlBytes, err := os.ReadFile(filepath.Join(agentDir, "agents.yaml"))
+	require.NoError(t, err)
+	text := string(yamlBytes)
+	assert.NotContains(t, text, "systemPrompt:", "prompts must not be inlined")
+	assert.NotContains(t, text, "You are the parent agent.", "prompt text must not appear in the YAML")
+
+	// Each prompting agent gets an external reference + a staged file.
+	var doc struct {
+		Agents []map[string]any `yaml:"agents"`
+	}
+	require.NoError(t, yaml.Unmarshal(yamlBytes, &doc))
+	byID := map[string]map[string]any{}
+	for _, e := range doc.Agents {
+		byID[e["id"].(string)] = e
+	}
+	for _, id := range []string{"parent", "child-a"} {
+		ref, ok := byID[id]["systemPromptFile"].(string)
+		require.True(t, ok, "agent %s must externalize its prompt", id)
+		assert.True(t, strings.HasPrefix(ref, "./prompts/"+id+"-"), "ref %q must live under prompts/ with a hash suffix", ref)
+		content, rerr := os.ReadFile(filepath.Join(agentDir, filepath.FromSlash(strings.TrimPrefix(ref, "./"))))
+		require.NoError(t, rerr)
+		want := "You are the parent agent."
+		if id == "child-a" {
+			want = "You are the child agent."
+		}
+		assert.Equal(t, want, string(content))
+	}
+	_, hasEmpty := byID["child-b"]["systemPromptFile"]
+	assert.False(t, hasEmpty, "agent without a prompt must not carry a prompt file reference")
+	assert.NotContains(t, text, "child-b-", "no prompt file for empty prompts")
+}
+
+// TestReadAgentYAML_SystemPromptRoundTrip ensures the graph read-back keeps
+// the prompt TEXT (API shape unchanged) even though the YAML stores a file
+// reference.
+func TestReadAgentYAML_SystemPromptRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "Long parent prompt", Subagents: []string{"child-a"}},
+		{Name: "child-a", Description: "c", SystemPrompt: "Long child prompt"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, model.ProviderConfig{}, nil, nil, nil))
+
+	graph, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 2)
+	assert.Equal(t, agents[0].SystemPrompt, graph.Agents[0].SystemPrompt)
+	assert.Equal(t, agents[1].SystemPrompt, graph.Agents[1].SystemPrompt)
+}
+
+// TestWriteAgentYAML_PromptStageFailurePreservesDeployment guards the write
+// order: system prompt files are staged BEFORE the atomic agents.yaml
+// commit, so a prompt staging failure leaves the previous deployment fully
+// intact.
+func TestWriteAgentYAML_PromptStageFailurePreservesDeployment(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	first := []model.AgentDefinition{
+		{Name: "parent", Description: "first", Model: "m", SystemPrompt: "Old prompt"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", first, model.ProviderConfig{}, nil, nil, nil))
+	agentDir := filepath.Join(dir, "parent", "agents")
+
+	// Make prompt staging fail: replace the prompts directory with a file.
+	require.NoError(t, os.RemoveAll(filepath.Join(agentDir, "prompts")))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "prompts"), []byte("blocker"), 0644))
+
+	second := []model.AgentDefinition{
+		{Name: "parent", Description: "second", Model: "m", SystemPrompt: "New prompt"},
+	}
+	err := store.WriteAgentYAML("parent", second, model.ProviderConfig{}, nil, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prompts")
+
+	// Old deployment untouched: agents.yaml still describes the first
+	// graph. (Read-back through the deliberately broken prompts path fails
+	// explicitly by design — disk corruption is surfaced, never silently
+	// degraded, same philosophy as the corrupt-manifest regression.)
+	yamlBytes, rerr := os.ReadFile(filepath.Join(agentDir, "agents.yaml"))
+	require.NoError(t, rerr)
+	assert.Contains(t, string(yamlBytes), "first")
+}
+
+// TestReadAgentYAML_SystemPromptFileTraversalRejected keeps a hand-edited
+// YAML's systemPromptFile reference inside the agents directory: a reference
+// escaping prompts/ is an explicit error, not a silent read.
+func TestReadAgentYAML_SystemPromptFileTraversalRejected(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "evil", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"),
+		[]byte("agents:\n  - id: evil\n    description: d\n    systemPromptFile: ../../victim.txt\n"), 0644))
+
+	_, err := NewAgentStorage(dir).ReadAgentYAML("evil")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes the prompts directory")
 }

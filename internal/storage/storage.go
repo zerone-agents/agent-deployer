@@ -46,15 +46,20 @@ type runtimeAgentEntry struct {
 	// provider.Protocol passed through verbatim — both sides use the same
 	// enum (anthropic-messages / openai-completions). Field order mirrors
 	// the runtime's own docs example: model, apiType, baseURL, apiKey.
-	APIType         string   `yaml:"apiType,omitempty"`
-	BaseURL         string   `yaml:"baseURL,omitempty"`
-	APIKey          string   `yaml:"apiKey,omitempty"`
-	SystemPrompt    string   `yaml:"systemPrompt,omitempty"`
-	MaxTurns        *int     `yaml:"maxTurns,omitempty"`
-	MaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
-	PermissionMode  string   `yaml:"permissionMode,omitempty"`
-	AllowedTools    []string `yaml:"allowedTools,omitempty"`
-	DisallowedTools []string `yaml:"disallowedTools,omitempty"`
+	APIType      string `yaml:"apiType,omitempty"`
+	BaseURL      string `yaml:"baseURL,omitempty"`
+	APIKey       string `yaml:"apiKey,omitempty"`
+	SystemPrompt string `yaml:"systemPrompt,omitempty"`
+	// SystemPromptFile replaces SystemPrompt when the prompt text is
+	// externalized (runtime v2.5.0 mutual-exclusion refine): a path relative
+	// to the configDir, pointing at prompts/<id>-<hash>.md inside the agents
+	// directory. Keeps long prompts out of the YAML document.
+	SystemPromptFile string   `yaml:"systemPromptFile,omitempty"`
+	MaxTurns         *int     `yaml:"maxTurns,omitempty"`
+	MaxSessionTurns  *int     `yaml:"maxSessionTurns,omitempty"`
+	PermissionMode   string   `yaml:"permissionMode,omitempty"`
+	AllowedTools     []string `yaml:"allowedTools,omitempty"`
+	DisallowedTools  []string `yaml:"disallowedTools,omitempty"`
 	// CustomTools lists verified tool file paths relative to the configDir (issue
 	// #10); each entry carries only the paths its own agent declared. The
 	// runtime resolves them itself.
@@ -124,6 +129,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	if !byID[rootName] {
 		return fmt.Errorf("no agent with id %q in graph", rootName)
 	}
+	promptRefs := computeSystemPromptRefs(agents)
 
 	entries := make([]runtimeAgentEntry, 0, len(agents))
 	for _, a := range agents {
@@ -131,7 +137,6 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 			ID:              a.Name,
 			Name:            a.Name,
 			Description:     a.Description,
-			SystemPrompt:    a.SystemPrompt,
 			MaxTurns:        a.MaxTurns,
 			AllowedTools:    a.Tools,
 			DisallowedTools: a.DisallowedTools,
@@ -139,6 +144,14 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 			Subagents:       a.Subagents,
 			McpServers:      a.McpServers,
 			Datasets:        a.Datasets,
+		}
+		if ref := promptRefs[a.Name]; ref != "" {
+			// Long prompts live in a file (runtime v2.5.0 systemPromptFile,
+			// mutually exclusive with systemPrompt); the deployer writes the
+			// staged file BEFORE the atomic agents.yaml commit, and the
+			// content-hashed file name means an older YAML still references
+			// its own prompt — no cross-generation pollution.
+			entry.SystemPromptFile = ref
 		}
 
 		if a.Name == rootName {
@@ -228,6 +241,15 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("create agent directory: %w", err)
 	}
 
+	// Stage the externalized system prompts BEFORE the atomic agents.yaml
+	// commit: a failure here leaves the previous deployment untouched, and
+	// because prompt file names embed a content hash, the old YAML keeps
+	// pointing at its own prompt file — the commit of agents.yaml is the
+	// single switch point.
+	if err := writeSystemPromptFiles(agentDir, agents); err != nil {
+		return err
+	}
+
 	// agents.yaml is the SINGLE authoritative document (graph + artifact
 	// declarations): staged tmp + atomic rename. A failed or interrupted
 	// update leaves the previous deployment fully intact and losslessly
@@ -247,6 +269,42 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	// review round).
 	removeLegacyManifest(agentDir)
 
+	return nil
+}
+
+// computeSystemPromptRefs maps each agent with a systemPrompt to its
+// external file reference (./prompts/<id>-<sha8>.md). The content-hashed
+// file name keeps consecutive deployments of the same agent from
+// overwriting a prompt a previous YAML document still references.
+func computeSystemPromptRefs(agents []model.AgentDefinition) map[string]string {
+	refs := make(map[string]string, len(agents))
+	for _, a := range agents {
+		if a.SystemPrompt == "" {
+			continue
+		}
+		name := fmt.Sprintf("%s-%s.md", a.Name, sha256Hex([]byte(a.SystemPrompt))[:8])
+		refs[a.Name] = "./prompts/" + name
+	}
+	return refs
+}
+
+// writeSystemPromptFiles stages every declared systemPrompt into
+// <agentDir>/prompts/<id>-<sha8>.md (0644) and returns the relative
+// references. Empty prompts write nothing.
+func writeSystemPromptFiles(agentDir string, agents []model.AgentDefinition) error {
+	for _, a := range agents {
+		if a.SystemPrompt == "" {
+			continue
+		}
+		promptsDir := filepath.Join(agentDir, "prompts")
+		if err := os.MkdirAll(promptsDir, 0755); err != nil {
+			return fmt.Errorf("create prompts directory: %w", err)
+		}
+		name := fmt.Sprintf("%s-%s.md", a.Name, sha256Hex([]byte(a.SystemPrompt))[:8])
+		if err := os.WriteFile(filepath.Join(promptsDir, name), []byte(a.SystemPrompt), 0644); err != nil {
+			return fmt.Errorf("write system prompt for agent %q: %w", a.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -358,7 +416,7 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 		if e.ID == name {
 			foundRoot = true
 		}
-		graph.Agents = append(graph.Agents, model.AgentDefinition{
+		def := model.AgentDefinition{
 			Name:            entryName,
 			Description:     e.Description,
 			Model:           e.Model,
@@ -372,7 +430,24 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 			McpServers:      e.McpServers,
 			Datasets:        e.Datasets,
 			Subagents:       e.Subagents,
-		})
+		}
+		if e.SystemPromptFile != "" {
+			// Resolve the externalized prompt back into graph text so the
+			// API shape never changes. Only files under the prompts
+			// directory are accepted (the reference travels in the YAML and
+			// must not escape the agents dir); a missing prompt file is an
+			// explicit error — silent prompt loss is worse.
+			clean := filepath.Clean(filepath.FromSlash(e.SystemPromptFile))
+			if !strings.HasPrefix(clean, "prompts"+string(filepath.Separator)) {
+				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory", entryName, e.SystemPromptFile)
+			}
+			content, rerr := os.ReadFile(filepath.Join(s.dataDir, name, "agents", clean))
+			if rerr != nil {
+				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, rerr)
+			}
+			def.SystemPrompt = string(content)
+		}
+		graph.Agents = append(graph.Agents, def)
 	}
 	if !foundRoot {
 		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)

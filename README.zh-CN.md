@@ -213,6 +213,8 @@ docker-compose 部署方式还额外接受：
 
 容器内唯一注入的 `ZERONE_AGENT_*` 环境变量是 `ZERONE_AGENT_HTTP_API_KEY`(来自请求的 `runtime_token`),用于 runtime 自身 HTTP API 鉴权,与 model 凭证无关。`runtime_token` 由调用方在 Create 请求中提供,deployer **不会**生成或持久化它,客户端需自行管理与轮转。
 
+为提高可读性,system prompt 默认外挂存储:每个 agent 的 `systemPrompt` 写入 `agents/<name>/agents/prompts/<id>-<sha8>.md`(与 `agents.yaml` 同目录、同一 bind mount),YAML entry 通过 `systemPromptFile` 引用(相对 config 目录,runtime v2.5.0)——长 prompt 不再平铺在 `agents.yaml` 中。读回时解析文件恢复为响应中的 `systemPrompt` 文本,API 形态不变。
+
 ## Skills
 
 图内各 agent 的 `skills` 与 `settingSources` 协同工作：
