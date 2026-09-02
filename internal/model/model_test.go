@@ -2037,3 +2037,23 @@ func TestCreateAgentRequest_RootAndAgentByID(t *testing.T) {
 	_, ok = req.AgentByID("ghost")
 	assert.False(t, ok)
 }
+
+// TestCreateAgentRequest_ErrorMessagesDoNotLeakSecrets guards issue #16
+// regression #10: validation errors must never embed MCP header secrets (or
+// any other credential material) even when the request is invalid.
+func TestCreateAgentRequest_ErrorMessagesDoNotLeakSecrets(t *testing.T) {
+	req := validGraphRequest()
+	req.Agents[1].McpServers["knowledge"] = McpServerConfig{
+		Type:    "http",
+		URL:     "https://example.invalid/mcp",
+		Headers: map[string]string{"Authorization": "Bearer SECRET-TOKEN"},
+	}
+	// Also make the request invalid in an unrelated way (cycle).
+	req.Agents[1].Subagents = []string{"child-b"}
+	req.Agents[2].Subagents = []string{"child-a"}
+
+	err := req.Validate()
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "SECRET-TOKEN")
+	assert.NotContains(t, err.Error(), "Bearer")
+}

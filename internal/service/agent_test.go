@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1224,5 +1225,65 @@ func TestAgentService_Create_RuntimeImageGate(t *testing.T) {
 				require.NoError(t, err)
 			}
 		})
+	}
+}
+
+// TestAgentService_Create_SharedToolDedupedButReferencedPerAgent guards the
+// issue #16 artifact contract: a tool declared identically by several agents
+// downloads ONCE into the shared flat tools dir, while every declaring
+// agent's YAML entry keeps its own customTools reference.
+func TestAgentService_Create_SharedToolDedupedButReferencedPerAgent(t *testing.T) {
+	body := []byte("export default { name: 'shared' }")
+	var downloads int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&downloads, 1)
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	sum := sha256.Sum256(body)
+	shared := model.ToolSource{
+		Name:     "shared-tool",
+		URL:      srv.URL,
+		Hash:     hex.EncodeToString(sum[:]),
+		FileName: "shared.mjs",
+	}
+
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.RootAgentID = "parent"
+	req.Agents = []model.AgentDefinition{
+		{
+			Name: "parent", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "s",
+			Subagents:   []string{"child-a"},
+			CustomTools: []model.ToolSource{shared},
+		},
+		{
+			Name: "child-a", Description: "c",
+			CustomTools: []model.ToolSource{shared},
+		},
+	}
+
+	_, _, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&downloads),
+		"identical tool declarations across agents must download exactly once")
+
+	// Exactly one file on disk...
+	assert.FileExists(t, filepath.Join(dataDir, "parent", "agents", "tools", "shared-tool.mjs"))
+
+	// ...but BOTH agents' entries reference it.
+	data, err := os.ReadFile(filepath.Join(dataDir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	var doc struct {
+		Agents []map[string]any `yaml:"agents"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.Len(t, doc.Agents, 2)
+	for _, e := range doc.Agents {
+		assert.Equal(t, []any{"./tools/shared-tool.mjs"}, e["customTools"],
+			"agent %v must keep its own customTools declaration", e["id"])
 	}
 }

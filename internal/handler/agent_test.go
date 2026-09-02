@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/zerone-agent/agent-deployer/internal/config"
 	"github.com/zerone-agent/agent-deployer/internal/docker"
@@ -914,4 +917,46 @@ func TestCreateAgent_RuntimeIncompatibleReturns503(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.NotContains(t, w.Body.String(), "sk-test", "error must not echo provider credentials")
 	assert.NotContains(t, w.Body.String(), "test-runtime-token", "error must not echo the runtime token")
+}
+
+// TestCreateAgent_DisallowedToolsRoundTripsToYAML guards issue #16 regression
+// #4: child disallowedTools must survive the full HTTP → service → storage
+// pipeline into agents.yaml.
+func TestCreateAgent_DisallowedToolsRoundTripsToYAML(t *testing.T) {
+	r, svc, _ := setupTestRouter(t)
+	body, _ := json.Marshal(model.CreateAgentRequest{
+		RootAgentID: "parent",
+		Agents: []model.AgentDefinition{
+			{
+				Name: "parent", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "s",
+				Subagents: []string{"child-a"},
+			},
+			{
+				Name: "child-a", Description: "c", SystemPrompt: "p",
+				DisallowedTools: []string{"Bash", "Write"},
+			},
+		},
+		Provider:     model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-test"},
+		RuntimeToken: "test-runtime-token",
+	})
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+
+	data, err := os.ReadFile(filepath.Join(svc.Config().DataDir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	var doc struct {
+		Agents []struct {
+			ID              string   `yaml:"id"`
+			DisallowedTools []string `yaml:"disallowedTools"`
+		} `yaml:"agents"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.Len(t, doc.Agents, 2)
+	var childDisallowed []string
+	for _, a := range doc.Agents {
+		if a.ID == "child-a" {
+			childDisallowed = a.DisallowedTools
+		}
+	}
+	assert.Equal(t, []string{"Bash", "Write"}, childDisallowed)
 }
