@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -512,7 +513,17 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	sum := sha256.Sum256(zipBytes)
 	zipHash := hex.EncodeToString(sum[:])
 
-	toolBody := []byte("export default { name: 'child-tool' }\n")
+	// File tool must satisfy runtime v2.5.0 materializeTool's hard contract
+	// (name + description + zod inputSchema + execute) — a bare {name}
+	// export fails materialization and makes child-a unavailable.
+	toolBody := []byte(`import { z } from "zod"
+export default {
+  name: "child-tool",
+  description: "Deterministic file tool",
+  inputSchema: z.object({}),
+  execute: async () => "file-tool-ok",
+}
+`)
 	toolSum := sha256.Sum256(toolBody)
 	toolHash := hex.EncodeToString(toolSum[:])
 	mux := http.NewServeMux()
@@ -543,7 +554,7 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	baseURL, _ := deployGraph(t, router, body)
+	baseURL, _, _ := deployGraph(t, router, body)
 	// Runtime v2.4.0 authenticates /v1/* via the x-api-key header (see
 	// runtime src/auth.ts) — NOT Authorization: Bearer. A 401 here means
 	// protocol drift between deployer tests and runtime auth.
@@ -647,6 +658,14 @@ func containerReachableServer(t *testing.T, h http.Handler) (*httptest.Server, s
 	return srv, "http://" + net.JoinHostPort(gateway, port)
 }
 
+// truncateForLog bounds a diagnostic string for test output.
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 // newRealRuntimeStack wires a deployer handler stack against a genuine
 // runtime image, mirroring the wiring of the tested Create path (assume-latest
 // bypassed: the assertions themselves fail loudly if the image does not
@@ -670,9 +689,9 @@ func newRealRuntimeStack(t *testing.T, realImage string) (*gin.Engine, *service.
 	return router, svc
 }
 
-// deployGraph posts a create request and returns the runtime-facing URL and
-// token from the response.
-func deployGraph(t *testing.T, router *gin.Engine, body []byte) (baseURL, runtimeToken string) {
+// deployGraph posts a create request and returns the runtime-facing URL,
+// token, and container name from the response.
+func deployGraph(t *testing.T, router *gin.Engine, body []byte) (baseURL, runtimeToken, containerName string) {
 	t.Helper()
 	w := doRequest(t, router, http.MethodPost, "/api/v1/agents", body)
 	if !assert.Equal(t, http.StatusCreated, w.Code, "graph deploy: %s", w.Body.String()) {
@@ -682,7 +701,7 @@ func deployGraph(t *testing.T, router *gin.Engine, body []byte) (baseURL, runtim
 		Data model.AgentResponse `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
-	return fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort), createResp.Data.RuntimeToken
+	return fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort), createResp.Data.RuntimeToken, createResp.Data.ContainerName
 }
 
 // waitForAgentsReady polls the runtime agent detail endpoint until every id
@@ -767,6 +786,7 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 		require.NoError(t, err)
 		var req struct {
 			Model    string `json:"model"`
+			Stream   bool   `json:"stream"`
 			Messages []struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
@@ -804,68 +824,118 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 			parentTurns++
 		}
 
-		toolCall := func(id, name, args string) map[string]any {
+		// Response shaping. The SDK speaks BOTH dialects (verified on ECS):
+		// prompt()/root runs request WITHOUT stream (createMessage → the
+		// response is parsed with response.json()), while subagents spawned
+		// via Task request WITH stream:true (createMessageStream → SSE
+		// decoder). The mock must answer in the dialect each request asked
+		// for — a JSON body on a stream request decodes to zero chunks, and
+		// an SSE body on a non-stream request fails response.json().
+		type logicalMsg map[string]any // role/content/tool_calls
+		jsonResp := func(finish string, msg logicalMsg) map[string]any {
 			return map[string]any{
 				"choices": []any{map[string]any{
-					"finish_reason": "tool_calls",
-					"message": map[string]any{
-						"role": "assistant",
-						"tool_calls": []any{map[string]any{
-							"id":   id,
-							"type": "function",
-							"function": map[string]any{
-								"name":      name,
-								"arguments": args,
-							},
-						}},
-					},
+					"finish_reason": finish,
+					"message":       msg,
 				}},
 			}
 		}
-		final := func(text string) map[string]any {
+		sseChunk := func(delta map[string]any, finish any) map[string]any {
 			return map[string]any{
 				"choices": []any{map[string]any{
-					"finish_reason": "stop",
-					"message":       map[string]any{"role": "assistant", "content": text},
+					"index":         0,
+					"delta":         delta,
+					"finish_reason": finish,
+				}},
+			}
+		}
+		writeResp := func(w http.ResponseWriter, reqStream bool, finish string, msg logicalMsg) {
+			if reqStream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher, _ := w.(http.Flusher)
+				emit := func(c map[string]any) {
+					b, _ := json.Marshal(c)
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+				if msg["content"] != nil {
+					emit(sseChunk(map[string]any{"role": "assistant", "content": msg["content"]}, nil))
+				}
+				if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 {
+					for i, tc := range tcs {
+						m := tc.(map[string]any)
+						emit(sseChunk(map[string]any{"tool_calls": []any{map[string]any{
+							"index": i, "id": m["id"], "type": "function",
+							"function": m["function"],
+						}}}, nil))
+					}
+				}
+				emit(sseChunk(map[string]any{}, finish))
+				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(jsonResp(finish, msg))
+		}
+		toolCallLogical := func(id, name, args string) logicalMsg {
+			return logicalMsg{
+				"role": "assistant",
+				"tool_calls": []any{map[string]any{
+					"id":   id,
+					"type": "function",
+					"function": map[string]any{
+						"name":      name,
+						"arguments": args,
+					},
 				}},
 			}
 		}
 
-		var resp map[string]any
+		var finish string
+		var msg logicalMsg
 		switch {
 		case isChildB:
 			// child-b declares nothing: answer immediately and terminate.
-			resp = final("child-b-done")
+			finish, msg = "stop", logicalMsg{"role": "assistant", "content": "child-b-done"}
 		case isChild && childTurns == 1:
 			// Ask for BOTH the file tool and the MCP tool in one turn.
-			resp = map[string]any{
-				"choices": []any{map[string]any{
-					"finish_reason": "tool_calls",
-					"message": map[string]any{
-						"role": "assistant",
-						"tool_calls": []any{
-							map[string]any{"id": "call-file", "type": "function",
-								"function": map[string]any{"name": "child-tool", "arguments": "{}"}},
-							map[string]any{"id": "call-mcp", "type": "function",
-								"function": map[string]any{"name": "mcp__knowledge__lookup", "arguments": "{}"}},
-						},
-					},
-				}},
+			finish = "tool_calls"
+			msg = logicalMsg{
+				"role": "assistant",
+				"tool_calls": []any{
+					map[string]any{"id": "call-file", "type": "function",
+						"function": map[string]any{"name": "child-tool", "arguments": "{}"}},
+					map[string]any{"id": "call-mcp", "type": "function",
+						"function": map[string]any{"name": "mcp__knowledge__lookup", "arguments": "{}"}},
+				},
 			}
 		case isChild:
-			resp = final("child-a-done")
+			finish, msg = "stop", logicalMsg{"role": "assistant", "content": "child-a-done"}
 		case parentTurns == 1:
-			resp = toolCall("call-task-a", "Task", `{"prompt":"do the research","description":"research","subagent_type":"General","subagent_name":"child-a"}`)
+			finish, msg = "tool_calls", toolCallLogical("call-task-a", "Task", `{"prompt":"do the research","description":"research","subagent_type":"General","subagent_name":"child-a"}`)
 		case parentTurns == 2:
 			// Exercise the EMPTY-capability child through the mount path too
 			// (issue regression #8: child-b must not see parent/child-a
 			// capabilities).
-			resp = toolCall("call-task-b", "Task", `{"prompt":"do the review","description":"review","subagent_type":"General","subagent_name":"child-b"}`)
+			finish, msg = "tool_calls", toolCallLogical("call-task-b", "Task", `{"prompt":"do the review","description":"review","subagent_type":"General","subagent_name":"child-b"}`)
 		default:
-			resp = final("parent-final")
+			finish, msg = "stop", logicalMsg{"role": "assistant", "content": "parent-final"}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		respJSON, _ := json.Marshal(map[string]any{"finish_reason": finish, "message": msg})
+		role := "parent"
+		if isChildB {
+			role = "child-b"
+		} else if isChild {
+			role = "child-a"
+		}
+		t.Logf("LLM-RESP role=%s turns(p=%d,c=%d,b=%d) stream=%v body=%s",
+			role, parentTurns, childTurns, len(childBReqs), req.Stream, truncateForLog(string(respJSON), 1000))
+		writeResp(w, req.Stream, finish, msg)
 	}))
 	t.Cleanup(llmSrv.Close)
 
@@ -939,8 +1009,17 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 
 	// ---- Deploy the graph ------------------------------------------------
 	router, svc := newRealRuntimeStack(t, realImage)
+	var containerName string
 
 	t.Cleanup(func() {
+		// Failure diagnostics: dump the runtime container's logs BEFORE the
+		// deployment is torn down so tool-execution failures are attributable
+		// (the container is deleted right after).
+		if t.Failed() && containerName != "" {
+			if out, cerr := exec.Command("docker", "logs", "--tail", "120", containerName).CombinedOutput(); cerr == nil {
+				t.Logf("=== runtime container %s logs ===\n%s", containerName, out)
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		_ = svc.Delete(ctx, "parent", true)
@@ -1001,7 +1080,10 @@ export default {
 			},
 			{
 				Name: "child-a", Description: "Research", SystemPrompt: "You are the research specialist.",
-				Tools: []string{"WebSearch"}, DisallowedTools: []string{"Bash"},
+				// "Skill" must be ALLOWED explicitly: allowedTools is a
+				// whitelist and filters the SDK built-in set (this is what
+				// gates the Skill tool, which is a built-in).
+				Tools: []string{"WebSearch", "Skill"}, DisallowedTools: []string{"Bash"},
 				SettingSources: []string{"user"},
 				Skills:         []model.SkillSource{{Name: "iso-skill", URL: artifactsURL + "/skill.zip", Hash: zipHash}},
 				CustomTools:    []model.ToolSource{{Name: "child-tool", URL: artifactsURL + "/child-tool.mjs", Hash: toolHash, FileName: "child-tool.mjs"}},
@@ -1017,7 +1099,7 @@ export default {
 	})
 	require.NoError(t, err)
 
-	baseURL, _ := deployGraph(t, router, body)
+	baseURL, _, containerName := deployGraph(t, router, body)
 	const runtimeToken = "it-runtime-token"
 
 	// Wait until every entry is ready: child-a's materialization includes a
@@ -1054,22 +1136,29 @@ export default {
 	// ---- Assertions on the execution path --------------------------------
 	mu.Lock()
 	defer mu.Unlock()
+	t.Logf("DIAG childReqs=%d parentReqs=%d childBReqs=%d mcpCalls=%d",
+		len(childReqs), len(parentReqs), len(childBReqs), mcpCalls)
+	if len(childReqs) > 0 {
+		t.Logf("DIAG child-a first request (first 6000 chars): %s", truncateForLog(string(childReqs[0].Raw), 6000))
+	}
 	require.NotEmpty(t, childReqs, "child-a must actually have been executed via Task")
 	require.NotEmpty(t, parentReqs, "parent must have been executed")
 
-	// Child-a system prompt carries ITS OWN prompt + datasets + skill — and
-	// nothing from the parent.
+	// Child-a system prompt carries ITS OWN prompt + datasets — and nothing
+	// from the parent. (Skills are NOT injected into prompt text: the SDK
+	// surfaces them lazily via the Skill tool / <available_skills>, so the
+	// mounted visibility is asserted on the tool boundary below.)
 	child1 := childReqs[0]
 	assert.Contains(t, child1.System, "research specialist")
 	assert.Contains(t, child1.System, "knowledge-a", "child datasets must be injected")
-	assert.Contains(t, child1.System, "isolation marker", "child skills must be visible in the prompt (description)")
 	assert.NotContains(t, child1.System, "parent coordinator")
 
-	// Child-a tool boundary: own file tool + own MCP tool + allowed tool;
-	// disallowed Bash and the parent's Task mount are absent.
+	// Child-a tool boundary: own file tool + own MCP tool + own Skill tool +
+	// allowed tool; disallowed Bash and the parent's Task mount are absent.
 	childTools := strings.Join(child1.Tools, ",")
 	assert.Contains(t, childTools, "child-tool", "fileTools must be mounted for child-a")
 	assert.Contains(t, childTools, "mcp__knowledge__lookup", "child MCP tools must be mounted")
+	assert.Contains(t, childTools, "Skill", "the child's own scanned skills must surface as the Skill tool")
 	assert.Contains(t, childTools, "WebSearch")
 	assert.NotContains(t, childTools, "Bash", "disallowedTools must be enforced")
 	assert.NotContains(t, childTools, "Task", "child mounts nothing")
@@ -1093,6 +1182,7 @@ export default {
 	assert.Contains(t, parentTools, "Task")
 	assert.NotContains(t, parentTools, "child-tool")
 	assert.NotContains(t, parentTools, "mcp__knowledge__lookup")
+	assert.NotContains(t, parentTools, "Skill", "skills must not leak up to the parent")
 	assert.Equal(t, "mock-model", parent1.Model)
 
 	// child-b was ALSO executed through the Task mount path with EMPTY
@@ -1108,10 +1198,10 @@ export default {
 	assert.NotContains(t, childBTools, "Task", "child-b mounts nothing")
 	assert.NotContains(t, childBTools, "child-tool", "sibling file tools must not leak into child-b")
 	assert.NotContains(t, childBTools, "mcp__knowledge__lookup", "sibling MCP tools must not leak into child-b")
-	// NOTE: WebSearch/Bash are SDK built-ins and legitimately appear in
-	// child-b's DEFAULT tool set (it declares no allowedTools and no
-	// disallowedTools); "empty declaration stays empty" governs mounted and
-	// declared capabilities, not the SDK default toolset.
+	// NOTE: the Skill TOOL is an SDK built-in and legitimately appears in
+	// child-b's default set (it declares no allowedTools). What must not
+	// leak is skill REGISTRY content — child-b's skill registry stays empty,
+	// asserted via detail (availableSkills) in the isolation test.
 	assert.Equal(t, "mock-model", childB1.Model)
 
 	// The parent's final turn carries BOTH children's Task results.
