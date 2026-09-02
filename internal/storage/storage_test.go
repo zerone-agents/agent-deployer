@@ -1838,3 +1838,27 @@ func TestWriteAgentYAML_PromptStagingSymlinkCannotEscape(t *testing.T) {
 	assert.Equal(t, "original", string(victimContent),
 		"prompt staging must never clobber files outside prompts/ via a squatting symlink")
 }
+
+// TestListAgentDirs_AcceptsDotSkillsNames guards the tenth-review P2: a
+// top-level entry named like ".skills-prod" is a VALID agent id and must
+// survive listing (the old `.skills-` prefix filter was a mis-scoped
+// attempt to skip skill-install staging roots, which actually live INSIDE a
+// deployment at <agentsDir>/skills/.skills-* and can never appear at the
+// data-dir top level).
+func TestListAgentDirs_AcceptsDotSkillsNames(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	for _, id := range []string{"alpha", ".skills-prod", "beta"} {
+		require.NoError(t, store.WriteAgentYAML(id, []model.AgentDefinition{
+			{Name: id, Description: "d", Model: "m", SystemPrompt: "p"},
+		}, model.ProviderConfig{}, nil, nil, nil))
+	}
+	// A deployment-internal staging residue must not affect listing either.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "alpha", "agents", "skills", ".skills-abc"), 0755))
+
+	names, err := store.ListAgentDirs()
+	require.NoError(t, err)
+	assert.Equal(t, []string{".skills-prod", "alpha", "beta"}, names,
+		"dot-prefixed agent ids must not be filtered from the list")
+}

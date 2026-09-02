@@ -615,13 +615,11 @@ func (s *AgentStorage) ListAgentDirs() ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		// Skip the internal staging roots used by skill installs: the legacy
-		// fixed ".skills-tmp" name and the per-install random ".skills-*"
-		// roots (which should be gone after a successful install but may
-		// linger after a crash).
-		if strings.HasPrefix(name, ".skills-") {
-			continue
-		}
+		// NOTE: no name-based filtering here. Skill-install staging roots
+		// live INSIDE a deployment (<agentsDir>/skills/.skills-*), never at
+		// the data-dir top level — and a top-level name like `.skills-prod`
+		// is a perfectly valid agent id, so entries are validated purely by
+		// the presence of agents/agents.yaml below.
 		yamlPath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
 		if _, err := os.Stat(yamlPath); err != nil {
 			if os.IsNotExist(err) {
