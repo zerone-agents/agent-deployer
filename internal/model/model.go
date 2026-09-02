@@ -7,22 +7,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-)
 
-// SubagentDefinition defines a subagent within an agent configuration.
-//
-// Note: there is intentionally no MaxSessionTurns field here. Subagents are
-// spawned one-shot (a fresh sessionId per spawn, single submitMessage), so the
-// "session-level history truncation" semantic of maxSessionTurns does not
-// apply. Tighten MaxTurns if a subagent runs too long. See agent-runtime
-// issue #1 for the full rationale.
-type SubagentDefinition struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Prompt      string   `json:"prompt"`
-	Tools       []string `json:"tools,omitempty"`
-	MaxTurns    *int     `json:"maxTurns,omitempty"`
-}
+	"github.com/zerone-agent/agent-deployer/internal/naming"
+)
 
 // McpServerConfig describes a single MCP server configuration.
 // The JSON API uses the "type" field name (matching middle-ground's McpClientDTO),
@@ -200,12 +187,15 @@ func (t ToolSource) Validate() error {
 	return nil
 }
 
-// AgentDefinition defines the agent configuration received from the client.
+// AgentDefinition is a complete Agent-local definition inside the deployment
+// graph (issue #16). Subagents are id references to other entries in the same
+// graph; mounted agents never inherit, merge, or fall back to parent
+// capabilities — an empty field stays empty.
 type AgentDefinition struct {
 	Name string `json:"name"`
 	// Description is a short human/agent-readable summary of what the agent
-	// does. Required: agent-runtime 2.0 rejects configs without it, and it is
-	// what the parent agent's Task tool shows when mounting subagents.
+	// does. Required on every entry: agent-runtime rejects configs without it,
+	// and it is what the parent agent's Task tool shows when mounting subagents.
 	Description     string   `json:"description"`
 	Model           string   `json:"model"`
 	SystemPrompt    string   `json:"systemPrompt"`
@@ -213,15 +203,21 @@ type AgentDefinition struct {
 	MaxSessionTurns *int     `json:"maxSessionTurns,omitempty"`
 	PermissionMode  string   `json:"permissionMode,omitempty"`
 	Tools           []string `json:"tools,omitempty"`
+	// DisallowedTools denies tools for this agent (agent-local policy,
+	// runtime v2.4.0+).
+	DisallowedTools []string `json:"disallowedTools,omitempty"`
 	// CustomTools lists single-file Tool artifacts to download and install
 	// (issue #10). Tools remains the complete allow-list; CustomTools only
 	// carries the artifacts selected for this agent.
-	CustomTools    []ToolSource               `json:"customTools,omitempty"`
-	Skills         []SkillSource              `json:"skills,omitempty"`
-	SettingSources []string                   `json:"settingSources,omitempty"`
-	Subagents      []SubagentDefinition       `json:"subagents,omitempty"`
-	McpServers     map[string]McpServerConfig `json:"mcpServers,omitempty"`
-	Datasets       map[string]string          `json:"datasets,omitempty"`
+	CustomTools    []ToolSource  `json:"customTools,omitempty"`
+	Skills         []SkillSource `json:"skills,omitempty"`
+	SettingSources []string      `json:"settingSources,omitempty"`
+	// ExtraUserSkillDirs lists additional user-level skill directories
+	// scanned when settingSources contains "user" (runtime v2.4.0+).
+	ExtraUserSkillDirs []string                   `json:"extraUserSkillDirs,omitempty"`
+	Subagents          []string                   `json:"subagents,omitempty"`
+	McpServers         map[string]McpServerConfig `json:"mcpServers,omitempty"`
+	Datasets           map[string]string          `json:"datasets,omitempty"`
 }
 
 // ProviderConfig defines the provider configuration for the LLM API.
@@ -333,14 +329,33 @@ func (h *HubConfig) Validate() error {
 	return nil
 }
 
-// CreateAgentRequest is the top-level request body for creating an agent.
+// CreateAgentRequest is the deployment payload for POST /agents: a complete
+// agent graph plus runtime-global provider config (issue #16). rootAgentId
+// doubles as the deployment name and must already be in sanitized form.
 type CreateAgentRequest struct {
-	Agent        AgentDefinition `json:"agent"`
-	Provider     ProviderConfig  `json:"provider"`
-	Aigc         *AigcConfig     `json:"aigc,omitempty"`
-	Force        bool            `json:"force"`
-	RuntimeToken string          `json:"runtime_token"`
-	Hub          *HubConfig      `json:"hub,omitempty"`
+	RootAgentID  string            `json:"rootAgentId"`
+	Agents       []AgentDefinition `json:"agents"`
+	Provider     ProviderConfig    `json:"provider"`
+	Aigc         *AigcConfig       `json:"aigc,omitempty"`
+	Force        bool              `json:"force"`
+	RuntimeToken string            `json:"runtime_token"`
+	Hub          *HubConfig        `json:"hub,omitempty"`
+}
+
+// Root returns the root agent definition. Call only after Validate.
+func (r *CreateAgentRequest) Root() *AgentDefinition {
+	a, _ := r.AgentByID(r.RootAgentID)
+	return a
+}
+
+// AgentByID returns the agent definition with the given id.
+func (r *CreateAgentRequest) AgentByID(id string) (*AgentDefinition, bool) {
+	for i := range r.Agents {
+		if r.Agents[i].Name == id {
+			return &r.Agents[i], true
+		}
+	}
+	return nil, false
 }
 
 // AgentStatus represents the state of an agent container.
@@ -423,14 +438,24 @@ func ValidateCreateRequest(req *CreateAgentRequest) error {
 	return req.Validate()
 }
 
-// Validate checks the CreateAgentRequest for required fields and valid values.
+// Validate checks the CreateAgentRequest: complete agent graph integrity plus
+// runtime-global provider config.
 func (r *CreateAgentRequest) Validate() error {
 	if r == nil {
 		return fmt.Errorf("request is nil")
 	}
 
-	if err := r.Agent.Validate(); err != nil {
-		return fmt.Errorf("agent: %w", err)
+	if r.RootAgentID == "" {
+		return fmt.Errorf("rootAgentId is required")
+	}
+	if !artifactNamePattern.MatchString(r.RootAgentID) {
+		return fmt.Errorf("rootAgentId %q must contain only letters, digits, dots, underscores, or hyphens", r.RootAgentID)
+	}
+	if naming.SanitizeName(r.RootAgentID) != r.RootAgentID {
+		return fmt.Errorf("rootAgentId %q must already be a sanitized deployment name (lowercase alphanumeric and hyphens)", r.RootAgentID)
+	}
+	if len(r.Agents) == 0 {
+		return fmt.Errorf("agents must contain at least the root agent definition")
 	}
 
 	if err := r.Provider.Validate(); err != nil {
@@ -452,33 +477,170 @@ func (r *CreateAgentRequest) Validate() error {
 		return fmt.Errorf("runtimeToken must not contain leading or trailing whitespace")
 	}
 
+	// Node-level validation + id uniqueness.
+	seen := make(map[string]bool, len(r.Agents))
+	for i := range r.Agents {
+		a := &r.Agents[i]
+		if seen[a.Name] {
+			return fmt.Errorf("duplicate agent id %q", a.Name)
+		}
+		seen[a.Name] = true
+		if err := a.Validate(); err != nil {
+			return fmt.Errorf("agent %q: %w", a.Name, err)
+		}
+	}
+
+	root, ok := r.AgentByID(r.RootAgentID)
+	if !ok {
+		return fmt.Errorf("rootAgentId %q not found in agents", r.RootAgentID)
+	}
+
+	// Runtime-global fields live on the root only (issue #16): writing them on
+	// a mounted agent would be silently ignored by the runtime, so they are
+	// rejected explicitly instead.
+	if strings.TrimSpace(root.Model) == "" {
+		return fmt.Errorf("agent %q: model is required (runtime-global field on the root agent)", root.Name)
+	}
+	if strings.TrimSpace(root.SystemPrompt) == "" {
+		return fmt.Errorf("agent %q: systemPrompt is required on the root agent", root.Name)
+	}
+	for i := range r.Agents {
+		a := &r.Agents[i]
+		if a.Name == r.RootAgentID {
+			continue
+		}
+		if a.Model != "" {
+			return fmt.Errorf("agent %q: model is a runtime-global field; only the root agent may declare it", a.Name)
+		}
+		if a.MaxSessionTurns != nil {
+			return fmt.Errorf("agent %q: maxSessionTurns is a runtime-global field; only the root agent may declare it", a.Name)
+		}
+		if a.PermissionMode != "" {
+			return fmt.Errorf("agent %q: permissionMode is a runtime-global field; only the root agent may declare it", a.Name)
+		}
+	}
+
+	// Subagent reference integrity: existence, no duplicates, no self refs.
+	for i := range r.Agents {
+		a := &r.Agents[i]
+		refs := make(map[string]bool, len(a.Subagents))
+		for _, ref := range a.Subagents {
+			if ref == a.Name {
+				return fmt.Errorf("agent %q references itself as a subagent", a.Name)
+			}
+			if !seen[ref] {
+				return fmt.Errorf("agent %q references unknown subagent %q", a.Name, ref)
+			}
+			if refs[ref] {
+				return fmt.Errorf("agent %q duplicates subagent reference %q", a.Name, ref)
+			}
+			refs[ref] = true
+		}
+	}
+
+	// Deployer rejects cycles outright; runtime depth-1 truncation is not a
+	// license to deploy self-mounting graphs.
+	if err := detectSubagentCycle(r.Agents); err != nil {
+		return err
+	}
+
+	// Cross-agent artifact sharing: same name ⇒ identical declaration.
+	tools := make(map[string]ToolSource)
+	toolOwner := make(map[string]string)
+	skills := make(map[string]SkillSource)
+	skillOwner := make(map[string]string)
+	for i := range r.Agents {
+		a := &r.Agents[i]
+		for _, src := range a.CustomTools {
+			if prev, dup := tools[src.Name]; dup {
+				if prev.URL != src.URL || prev.Hash != src.Hash {
+					return fmt.Errorf("custom tool %q has conflicting declarations (agents %q and %q): same name requires identical url and hash", src.Name, toolOwner[src.Name], a.Name)
+				}
+				continue
+			}
+			tools[src.Name] = src
+			toolOwner[src.Name] = a.Name
+		}
+		for _, src := range a.Skills {
+			if prev, dup := skills[src.Name]; dup {
+				if prev.URL != src.URL || prev.Hash != src.Hash {
+					return fmt.Errorf("skill %q has conflicting declarations (agents %q and %q): same name requires identical url and hash", src.Name, skillOwner[src.Name], a.Name)
+				}
+				continue
+			}
+			skills[src.Name] = src
+			skillOwner[src.Name] = a.Name
+		}
+		// Skill visibility: per-agent install dirs are scanned at user level.
+		if len(a.Skills) > 0 && !containsString(a.SettingSources, "user") {
+			return fmt.Errorf("agent %q declares skills: settingSources must include \"user\" (skills are installed per-agent and scanned at user level)", a.Name)
+		}
+	}
+
 	return nil
 }
 
-// Validate checks the AgentDefinition for required fields and valid subagent configurations.
+// detectSubagentCycle reports an error when the subagent reference graph
+// contains a cycle (DFS, tri-color marking).
+func detectSubagentCycle(agents []AgentDefinition) error {
+	const (
+		white = iota // unvisited
+		gray         // on current path
+		black        // done
+	)
+	color := make(map[string]int, len(agents))
+	byID := make(map[string]*AgentDefinition, len(agents))
+	for i := range agents {
+		byID[agents[i].Name] = &agents[i]
+	}
+	var visit func(id string, path []string) error
+	visit = func(id string, path []string) error {
+		color[id] = gray
+		path = append(path, id)
+		for _, ref := range byID[id].Subagents {
+			switch color[ref] {
+			case gray:
+				return fmt.Errorf("subagent reference cycle detected: %s -> %s", strings.Join(path, " -> "), ref)
+			case white:
+				if err := visit(ref, path); err != nil {
+					return err
+				}
+			}
+		}
+		color[id] = black
+		return nil
+	}
+	for id := range byID {
+		if color[id] == white {
+			if err := visit(id, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks one graph node's Agent-local fields. Graph-level rules
+// (id uniqueness, root-only runtime-global fields, reference integrity) are
+// enforced by CreateAgentRequest.Validate.
 func (a *AgentDefinition) Validate() error {
 	if strings.TrimSpace(a.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
+	if !artifactNamePattern.MatchString(a.Name) {
+		return fmt.Errorf("name %q must contain only letters, digits, dots, underscores, or hyphens", a.Name)
+	}
 	if strings.TrimSpace(a.Description) == "" {
 		return fmt.Errorf("description is required")
-	}
-	if strings.TrimSpace(a.Model) == "" {
-		return fmt.Errorf("model is required")
-	}
-	if strings.TrimSpace(a.SystemPrompt) == "" {
-		return fmt.Errorf("systemPrompt is required")
-	}
-
-	seen := make(map[string]struct{}, len(a.Subagents))
-	for i, sub := range a.Subagents {
-		if _, ok := seen[sub.Name]; ok {
-			return fmt.Errorf("subagents[%d]: duplicate name %q", i, sub.Name)
-		}
-		seen[sub.Name] = struct{}{}
-		if err := sub.Validate(); err != nil {
-			return fmt.Errorf("subagents[%d]: %w", i, err)
-		}
 	}
 
 	seenDatasets := make(map[string]struct{}, len(a.Datasets))
@@ -532,20 +694,6 @@ func (a *AgentDefinition) Validate() error {
 		}
 	}
 
-	return nil
-}
-
-// Validate checks the SubagentDefinition for required fields.
-func (s *SubagentDefinition) Validate() error {
-	if strings.TrimSpace(s.Name) == "" {
-		return fmt.Errorf("name is required")
-	}
-	if strings.TrimSpace(s.Description) == "" {
-		return fmt.Errorf("description is required")
-	}
-	if strings.TrimSpace(s.Prompt) == "" {
-		return fmt.Errorf("prompt is required")
-	}
 	return nil
 }
 
