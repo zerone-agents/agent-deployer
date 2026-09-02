@@ -100,11 +100,13 @@ export API_KEY=<your key>   # can be omitted when authentication is disabled
 
 ### 1. Create Agent
 
-Creates and starts an agent runtime container from a **complete agent graph** (issue #16): `rootAgentId` names the container's entry agent, and `agents` carries the full Agent-local definition of every agent in the deployment closure. `subagents` are pure id references — mounted agents never inherit, merge, or fall back to parent capabilities; an empty field stays empty. The deployment name is the `rootAgentId` itself (it must already be in sanitized form: lowercase alphanumeric and hyphens). Custom tools and skills declared anywhere in the graph are downloaded and hash-verified before the container is created; any install failure aborts the request without starting a container.
+Creates and starts an agent runtime container from a **complete agent graph** (issue #16): `rootAgentId` names the container's entry agent, and `agents` carries the full Agent-local definition of every agent in the deployment closure. `subagents` are pure id references — mounted agents never inherit, merge, or fall back to parent capabilities; an empty field stays empty. The deployment resource identity is the **`deploymentKey`** (issue #18): it keys the Docker container name, labels, lifecycle lookups, and the per-deployment data directories, and must already be in sanitized form (lowercase alphanumeric and hyphens). `rootAgentId` carries only the runtime agent graph identity and never leaks into infrastructure naming — a tenant-scoped `deploymentKey` like `acme-assistant` can deploy a bare root agent id `assistant`. Custom tools and skills declared anywhere in the graph are downloaded and hash-verified before the container is created; any install failure aborts the request without starting a container.
 
 > **Breaking change (deployer v3.0.0)**: the legacy inline shape (`"agent": {...}` with `subagents` as five-field stubs) is rejected with an explicit 400 diagnostic. See [Migration from the inline protocol](#migration-from-the-inline-protocol).
 
-- **Idempotency**: if a container with the same name already exists and `force=false` (default), the existing container is returned unchanged with 200; with `force=true`, the old container is stopped + deleted first, then rebuilt with the new configuration (session data is preserved).
+> **Breaking change (issue #18)**: `deploymentKey` is required. A request without it is rejected with an explicit 400 (`deploymentKey is required`) — there is deliberately **no fallback** to `rootAgentId`, because a silent fallback would reintroduce cross-tenant same-name collisions. See [Migration from rootAgentId-scoped deployments](#migration-from-rootagentid-scoped-deployments).
+
+- **Idempotency**: if a container with the same deployment key already exists and `force=false` (default), the existing container is returned unchanged with 200; with `force=true`, the old container is stopped + deleted first, then rebuilt with the new configuration (session data is preserved). Two deployments may share the same `rootAgentId` as long as their `deploymentKey`s differ.
 - **Runtime image floor**: the graph protocol requires runtime **v2.4.0+**. The deployer refuses deployment (503) unless `AGENT_DEPLOYER_RUNTIME_IMAGE` pins a v2.4.0+ tag, or `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` is set for a `:latest` image — a complete agent graph is never silently handed to an old runtime.
 - **Method**: `POST /agents`
 - **Content-Type**: `application/json`
@@ -113,7 +115,8 @@ Creates and starts an agent runtime container from a **complete agent graph** (i
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `rootAgentId` | string | Yes | Id of the container's entry agent. Doubles as the deployment name: must already match `[a-z0-9-]` (sanitized form), and a definition with this id must exist in `agents` |
+| `rootAgentId` | string | Yes | Id of the container's entry agent (runtime agent graph identity). Must match `[A-Za-z0-9._-]{1,64}` and a definition with this id must exist in `agents`. Written to `agents.yaml` as the bare root id — it never keys infrastructure resources |
+| `deploymentKey` | string | Yes | Deployment resource identity (issue #18): keys the Docker container name, labels, lifecycle lookups, and the data/session/artifact directories. Must already match `[a-z0-9-]` (sanitized form). Missing or unsanitized values are rejected explicitly — no fallback to `rootAgentId` |
 | `agents` | AgentDefinition[] | Yes | The complete deployment closure: one full Agent-local definition per agent, including the root. Every `subagents` reference must resolve to exactly one entry in this list |
 | `provider` | object | Yes | Runtime-global LLM provider configuration (written to the root entry only), see [ProviderConfig](#providerconfig) |
 | `aigc` | object | No | AIGC content labeling configuration (GB 45438-2025), see [AigcConfig](#aigcconfig). When omitted or `enabled=false`, the runtime does not add labels |
@@ -129,6 +132,7 @@ curl -X POST "$DEPLOYER/agents" \
   ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
   -d '{
     "rootAgentId": "coder",
+    "deploymentKey": "acme-coder",
     "agents": [
       {
         "name": "coder",
@@ -172,15 +176,16 @@ curl -X POST "$DEPLOYER/agents" \
   "success": true,
   "data": {
     "agentName": "coder",
+    "deploymentKey": "acme-coder",
     "instanceId": "a1b2c3d4",
     "containerId": "9f3c...e21",
-    "containerName": "cloud-agent-coder-a1b2c3d4",
+    "containerName": "cloud-agent-acme-coder-a1b2c3d4",
     "status": "running",
     "hostPort": 32768,
     "createdAt": "2026-06-25T10:00:00Z",
-    "yamlPath": "/var/lib/agent-deployer/coder/agents/agents.yaml",
-    "sessionDir": "/var/lib/agent-deployer/coder/sessions",
-    "skillsDir": "/var/lib/agent-deployer/coder/agents/skills",
+    "yamlPath": "/var/lib/agent-deployer/acme-coder/agents/agents.yaml",
+    "sessionDir": "/var/lib/agent-deployer/acme-coder/sessions",
+    "skillsDir": "/var/lib/agent-deployer/acme-coder/agents/skills",
     "containerSkillsDir": "/app/config/skills",
     "runtimeToken": "caller-provided-runtime-token"
   }
@@ -191,10 +196,11 @@ curl -X POST "$DEPLOYER/agents" \
 
 | Field | Type | Description |
 |---|---|---|
-| `agentName` | string | Deployment name (= rootAgentId, unique key) |
+| `agentName` | string | Bare runtime root agent id (= `rootAgentId`). Empty for archived entries and containers created before the issue #18 split |
+| `deploymentKey` | string | Deployment resource identity (= `deploymentKey`): the unique infra key backing container/labels/directories and all lifecycle lookups |
 | `instanceId` | string | Short random ID generated at creation time, attached to the Docker label `agent-deployer/agent.instance-id`, reserved for future HA scenarios |
 | `containerId` | string | Full Docker container ID |
-| `containerName` | string | Docker container name, of the form `cloud-agent-<name>-<instanceId>` |
+| `containerName` | string | Docker container name, of the form `cloud-agent-<deploymentKey>-<instanceId>` |
 | `status` | string | Status enum, see [AgentStatus](#agentstatus) |
 | `hostPort` | int | Port mapped to the host (the runtime's internal container port is fixed, controlled by `AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT`, default 3000) |
 | `createdAt` | string | RFC3339 UTC timestamp |
@@ -227,9 +233,10 @@ curl "$DEPLOYER/agents" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
   "data": [
     {
       "agentName": "coder",
+      "deploymentKey": "acme-coder",
       "instanceId": "a1b2c3d4",
       "containerId": "9f3c...",
-      "containerName": "cloud-agent-coder-a1b2c3d4",
+      "containerName": "cloud-agent-acme-coder-a1b2c3d4",
       "status": "running",
       "hostPort": 32768
     }
@@ -244,12 +251,12 @@ curl "$DEPLOYER/agents" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ### 3. Get Agent Details
 
 - **Method**: `GET /agents/:name`
-- **Path parameters**: `name` — agent name (sanitized the same way, case-insensitive)
+- **Path parameters**: `name` — deployment key (sanitized the same way, case-insensitive). This is the `deploymentKey` from Create; the bare root agent id is not a lookup key
 
 #### Request Example
 
 ```bash
-curl "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
+curl "$DEPLOYER/agents/acme-coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
 #### Success Response (200)
@@ -259,9 +266,10 @@ curl "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
   "success": true,
   "data": {
     "agentName": "coder",
+    "deploymentKey": "acme-coder",
     "instanceId": "a1b2c3d4",
     "containerId": "9f3c...",
-    "containerName": "cloud-agent-coder-a1b2c3d4",
+    "containerName": "cloud-agent-acme-coder-a1b2c3d4",
     "status": "running",
     "hostPort": 32768
   }
@@ -270,7 +278,7 @@ curl "$DEPLOYER/agents/coder" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 
 #### Failure Response
 
-- `404`: `{ "success": false, "error": "agent \"coder\": agent not found" }`
+- `404`: `{ "success": false, "error": "deployment \"acme-coder\": agent not found" }`
 - `500`: Docker query failure
 
 ---
@@ -284,7 +292,7 @@ Returns the container's live Docker state and health check result. **After creat
 #### Request Example
 
 ```bash
-curl "$DEPLOYER/agents/coder/status" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
+curl "$DEPLOYER/agents/acme-coder/status" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
 #### Success Response (200)
@@ -294,7 +302,8 @@ curl "$DEPLOYER/agents/coder/status" ${API_KEY:+-H "Authorization: Bearer $API_K
   "success": true,
   "data": {
     "agentName": "coder",
-    "containerName": "cloud-agent-coder-a1b2c3d4",
+    "deploymentKey": "acme-coder",
+    "containerName": "cloud-agent-acme-coder-a1b2c3d4",
     "containerId": "9f3c...",
     "status": "running",
     "health": "healthy",
@@ -422,7 +431,8 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 ```jsonc
 {
-  "rootAgentId": "coder",          // string, required; entry agent id == deployment name
+  "rootAgentId": "coder",          // string, required; entry agent id (runtime graph identity)
+  "deploymentKey": "acme-coder",   // string, required; deployment resource identity (issue #18)
   "agents": [ /* AgentDefinition[] */ ],
   "provider": ProviderConfig,       // runtime-global; written to the root entry only
   "force": false,                   // boolean
@@ -432,7 +442,8 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 Graph-level validation (all failures return 400 with an explicit diagnostic):
 
-- `rootAgentId` is required, must match `[a-z0-9-]` (already sanitized), and must have a definition in `agents`.
+- `rootAgentId` is required, must match `[A-Za-z0-9._-]{1,64}`, and must have a definition in `agents`. It is the runtime agent graph identity only — it never keys infrastructure resources.
+- `deploymentKey` is required (issue #18), must match `[a-z0-9-]` (already sanitized), and must be a single path segment. It keys the container name, Docker labels, lifecycle lookups, and the data/session/artifact directories; there is no fallback to `rootAgentId` when it is missing.
 - Agent ids are unique across the graph (`duplicate agent id`).
 - Every `subagents` reference must exist (`references unknown subagent`), must not repeat (`duplicates subagent reference`), and must not point at itself (`references itself`).
 - Cycles are rejected outright (`subagent reference cycle detected`), even though the runtime truncates delegation at depth 1.
@@ -447,7 +458,7 @@ One full Agent-local definition inside the deployment graph. Every entry — roo
 
 | Field | Type | Required | Validation Rules | Description |
 |---|---|---|---|---|
-| `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}`; unique across the graph | Agent id. The root's name must equal `rootAgentId` in sanitized form |
+| `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}`; unique across the graph | Agent id. The root's name must equal `rootAgentId` |
 | `description` | string | Yes | Non-empty | Description of the agent's capabilities; what the parent agent's Task tool displays when mounting this agent |
 | `model` | string | Root only | Required on the root; forbidden on non-root agents | Runtime-global model name, e.g. `claude-sonnet-4-6`. Mounted agents reuse the root runtime's execution environment |
 | `systemPrompt` | string | Root: yes | Non-empty on the root; optional for mounted agents | System prompt. The deployer externalizes it for readability: staged as `prompts/<id>-<sha16>.md` next to `agents.yaml` (bind-mounted into the container) and referenced via the entry's `systemPromptFile` (runtime v2.4.0+ mutual-exclusion refine, relative to the config dir). Read-back restores the text, so the API shape never changes |
@@ -497,6 +508,24 @@ Migration mapping:
 | (not expressible before) | Child `mcpServers` / `customTools` / `skills` / `settingSources` / `datasets` / `disallowedTools` / `maxTurns` — each child now owns its full Agent-local profile |
 
 Note: child `model` / `maxSessionQueries` / `permissionMode` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
+
+### Migration from rootAgentId-scoped deployments
+
+Before issue #18, `rootAgentId` doubled as the deployment resource name: tenants scoped it as `<org>-<agent-name>` (e.g. `acme-assistant`), which leaked infrastructure naming into the runtime agent graph. The split makes the boundary explicit:
+
+| Pre-split | Post-split (issue #18) |
+|---|---|
+| `"rootAgentId": "acme-assistant"` (scoped, doubles as deployment name) | `"deploymentKey": "acme-assistant"` + `"rootAgentId": "assistant"` (bare) |
+| `agents[0].name` = scoped id | `agents[0].name` = bare `assistant`; `agents.yaml` contains only bare runtime ids |
+| Lifecycle: `GET /agents/acme-assistant` | Unchanged — the path parameter is the deployment key |
+| Response `agentName` = scoped id | Response `agentName` = bare root id, plus a new `deploymentKey` field |
+
+Compatibility rules:
+
+- Requests **without** `deploymentKey` are rejected with 400 (`deploymentKey is required`) — never a silent fallback, which would reintroduce cross-tenant same-name collisions.
+- Existing `<org>-<agent-name>` containers and data directories need **no migration**: redeploying with the same `deploymentKey` keeps every resource key (container labels, directories) and rewrites `agents.yaml` with the bare root id plus the deployer-private `x-deployer-root-agent-id` marker.
+- Upgrade order: deploy the new deployer first, then upgrade clients (hub), then force-redeploy existing agents with `deploymentKey` = the existing scoped key and the bare `rootAgentId`.
+- `agentName` is empty in responses for archived entries and containers created before the split (the bare root id was not recorded on them).
 
 ### ProviderConfig
 
@@ -565,7 +594,8 @@ The data structure returned by `POST /agents`, `GET /agents/:name`, and `GET /ag
 
 | Field | Type | Always Present | Description |
 |---|---|---|---|
-| `agentName` | string | Yes | |
+| `agentName` | string | Yes | Bare runtime root agent id (= `rootAgentId`); empty for archived entries and pre-split containers |
+| `deploymentKey` | string | Yes | Deployment resource identity: the unique infra key for container/labels/directories and lifecycle lookups |
 | `instanceId` | string | Yes | |
 | `containerId` | string | Yes | |
 | `containerName` | string | Yes | |
@@ -574,9 +604,9 @@ The data structure returned by `POST /agents`, `GET /agents/:name`, and `GET /ag
 | `createdAt` | string | `POST` only | RFC3339 UTC |
 | `yamlPath` | string | `POST` only | Path to the complete agent graph YAML |
 | `sessionDir` | string | `POST` only | |
-| `skillsDir` | string | `POST` only, and only when any agent in the graph declares skills | Host-side root of per-agent skill directories (`<dataDir>/<name>/agents/skills`) |
+| `skillsDir` | string | `POST` only, and only when any agent in the graph declares skills | Host-side root of per-agent skill directories (`<dataDir>/<deploymentKey>/agents/skills`) |
 | `containerSkillsDir` | string | `POST` only, together with `skillsDir` | In-container root (`/app/config/skills`); skills reach the runtime via the `/app/config` bind mount |
-| `toolsDir` | string | `POST` only, and only when custom tools are declared | Host-side shared flat tool directory (`<dataDir>/<name>/agents/tools`) |
+| `toolsDir` | string | `POST` only, and only when custom tools are declared | Host-side shared flat tool directory (`<dataDir>/<deploymentKey>/agents/tools`) |
 | `runtimeToken` | string | `POST` only | Token provided by the caller, identical to the `ZERONE_AGENT_HTTP_API_KEY` injected into the container; not returned by Get / List |
 
 ### AgentStatus
@@ -618,11 +648,11 @@ A complete "create → wait for readiness → use → destroy" workflow:
 RESP=$(curl -s -X POST "$DEPLOYER/agents" \
   -H 'Content-Type: application/json' \
   ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
-  -d '{ "rootAgentId": "coder", "agents": [ { "name": "coder", "description": "...", "model": "...", "systemPrompt": "..." } ], "provider": { ... }, "runtime_token": "..." }')
+  -d '{ "rootAgentId": "coder", "deploymentKey": "acme-coder", "agents": [ { "name": "coder", "description": "...", "model": "...", "systemPrompt": "..." } ], "provider": { ... }, "runtime_token": "..." }')
 
-# 2. Poll health status until healthy
+# 2. Poll health status until healthy (path parameter = deploymentKey)
 while :; do
-  HEALTH=$(curl -s "$DEPLOYER/agents/coder/status" \
+  HEALTH=$(curl -s "$DEPLOYER/agents/acme-coder/status" \
     ${API_KEY:+-H "Authorization: Bearer $API_KEY"} \
     | jq -r '.data.health')
   [ "$HEALTH" = "healthy" ] && break
@@ -634,14 +664,14 @@ done
 PORT=$(echo "$RESP" | jq -r '.data.hostPort')
 
 # 4. Stop / restart (as needed)
-curl -X POST "$DEPLOYER/agents/coder/stop"    ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
-curl -X POST "$DEPLOYER/agents/coder/restart" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
+curl -X POST "$DEPLOYER/agents/acme-coder/stop"    ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
+curl -X POST "$DEPLOYER/agents/acme-coder/restart" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 
 # 5. Check logs to troubleshoot
-curl "$DEPLOYER/agents/coder/logs?tail=500" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
+curl "$DEPLOYER/agents/acme-coder/logs?tail=500" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 
 # 6. Full destruction
-curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
+curl -X DELETE "$DEPLOYER/agents/acme-coder?removeData=true" ${API_KEY:+-H "Authorization: Bearer $API_KEY"}
 ```
 
 ---
@@ -650,7 +680,8 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 | Symptom | What to Check |
 |---|---|
-| Create returns 400 `invalid request` | Check `rootAgentId` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionQueries`/`permissionMode` are root-only |
+| Create returns 400 `deploymentKey is required` | Pre-split client: the request lacks `deploymentKey`. Add it (sanitized `[a-z0-9-]`), keeping `rootAgentId` as the bare root agent id (see Migration from rootAgentId-scoped deployments) |
+| Create returns 400 `invalid request` | Check `rootAgentId` + `deploymentKey` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionQueries`/`permissionMode` are root-only |
 | Create returns 400 mentioning `legacy request shape` | The request uses the removed inline `"agent"` field — migrate to `rootAgentId` + `agents` (see Migration from the inline protocol) |
 | Create returns 503 `runtime image incompatible` | Pin `AGENT_DEPLOYER_RUNTIME_IMAGE` to a v2.4.0+ tag, or set `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` when `:latest` is known to be v2.4.0+ |
 | Create returns 500 `find existing container` | Check whether the deployer container can access `/var/run/docker.sock` |

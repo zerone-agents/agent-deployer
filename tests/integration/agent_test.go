@@ -1280,3 +1280,78 @@ func TestIntegration_AgentGraphSessionCap(t *testing.T) {
 	assert.Nil(t, detail.LegacyMaxSessionTurns,
 		"the legacy detail key must be gone on v2.6.0: %s", string(raw))
 }
+
+// TestIntegration_DeploymentKeySplit is the issue #18 acceptance flow against
+// a real Docker daemon: a tenant-scoped deployment key plus a bare runtime
+// root agent id. The deployment key keys the container, labels, and on-disk
+// directories; agents.yaml carries only bare runtime ids.
+func TestIntegration_DeploymentKeySplit(t *testing.T) {
+	svc, r := newStack(t)
+	deploymentKey := "it-split-" + time.Now().Format("150405")
+
+	// Always clean up, even if an assertion fails.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(ctx, deploymentKey, true)
+	})
+
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID:   "assistant",
+		DeploymentKey: deploymentKey,
+		Agents: []model.AgentDefinition{
+			{
+				Name: "assistant", Description: "split acceptance agent",
+				Model: "claude-sonnet-4-6", SystemPrompt: "split acceptance agent",
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-integration-fake-key",
+		},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	// 1. Create with deploymentKey != rootAgentId.
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusCreated, w.Code, "create body: %s", w.Body.String())
+	var createResp struct {
+		Success bool                `json:"success"`
+		Data    model.AgentResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
+	assert.True(t, createResp.Success)
+	assert.Equal(t, "assistant", createResp.Data.AgentName,
+		"response agentName is the bare runtime root id")
+	assert.Equal(t, deploymentKey, createResp.Data.DeploymentKey,
+		"response deploymentKey is the tenant-scoped infra key")
+	assert.Contains(t, createResp.Data.ContainerName, "cloud-agent-"+deploymentKey+"-",
+		"container name derives from the deployment key")
+
+	// 2. agents.yaml lives under the deployment key dir and uses bare runtime ids.
+	yamlBytes, err := os.ReadFile(filepath.Join(svc.Config().DataDir, deploymentKey, "agents", "agents.yaml"))
+	require.NoError(t, err)
+	text := string(yamlBytes)
+	assert.Contains(t, text, "id: assistant")
+	assert.Contains(t, text, "x-deployer-root-agent-id: assistant")
+	assert.NotContains(t, text, "id: "+deploymentKey,
+		"the deployment key must never appear as a runtime agent id")
+
+	// 3. Container labels: lookup by deployment key, root-id label present.
+	dc, err := docker.NewClient()
+	require.NoError(t, err)
+	defer dc.Close()
+	rc, err := dc.FindAgentContainer(context.Background(), deploymentKey)
+	require.NoError(t, err)
+	require.NotNil(t, rc, "container must be findable by deployment key")
+	assert.Equal(t, deploymentKey, rc.DeploymentKey)
+	assert.Equal(t, "assistant", rc.RootAgentID)
+
+	// 4. Lifecycle lookups key on the deployment key alone.
+	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/"+deploymentKey+"/status", nil)
+	assert.Equal(t, http.StatusOK, w.Code, "status body: %s", w.Body.String())
+	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/"+deploymentKey, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "get body: %s", w.Body.String())
+}
