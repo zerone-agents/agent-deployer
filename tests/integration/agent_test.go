@@ -20,6 +20,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -464,4 +466,187 @@ func TestIntegration_AgentGraphLifecycle(t *testing.T) {
 	// Each artifact downloaded exactly once.
 	assert.Equal(t, 1, skillReqs, "skill zip downloaded once")
 	assert.Equal(t, 1, toolReqs, "tool file downloaded once")
+}
+
+// TestIntegration_AgentGraphRuntimeIsolation is the real-runtime acceptance
+// test for issue #16 (regressions #8/#9): it deploys a complete graph and
+// asks the RUNNING runtime — not the deployer's own YAML — what each agent
+// can see. Passes only against a genuine open-agent-runtime v2.4.0+ image;
+// set CAM_INTEGRATION_REAL_RUNTIME_IMAGE (e.g. on the ECS host, where the
+// real image is available) to run it. Skipped otherwise: the local stand-in
+// image (nginx:alpine tagged as the runtime) has no runtime API to call.
+func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
+	realImage := os.Getenv("CAM_INTEGRATION_REAL_RUNTIME_IMAGE")
+	if realImage == "" {
+		t.Skip("set CAM_INTEGRATION_REAL_RUNTIME_IMAGE to a real open-agent-runtime v2.4.0+ image to run this test")
+	}
+	requireDocker(t)
+
+	// Same wiring as newStack, but with the caller-provided runtime image and
+	// the assume-latest gate bypassed (the assertion below fails loudly if the
+	// image does not actually implement the runtime API).
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+	cfg := &config.Config{
+		DataDir:                  dir,
+		Port:                     18080,
+		RuntimeImage:             realImage,
+		RuntimeContainerPort:     3000,
+		RuntimeImageAssumeLatest: true,
+	}
+	dc := requireDocker(t)
+	t.Cleanup(func() { _ = dc.Close() })
+	svc := service.NewAgentService(cfg, dc)
+	h := handler.NewAgentHandler(svc)
+	r := gin.New()
+	h.Register(r.Group("/api/v1"))
+
+	agentName := "it-iso-" + time.Now().Format("150405")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(ctx, agentName, true)
+	})
+
+	// In-process artifact server: child-a's skill zip + custom tool file.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	f, err := zw.Create("SKILL.md")
+	require.NoError(t, err)
+	_, err = f.Write([]byte("# isolation skill\n"))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	zipBytes := zipBuf.Bytes()
+	sum := sha256.Sum256(zipBytes)
+	zipHash := hex.EncodeToString(sum[:])
+
+	toolBody := []byte("export default { name: 'child-tool' }\n")
+	toolSum := sha256.Sum256(toolBody)
+	toolHash := hex.EncodeToString(toolSum[:])
+	mux := http.NewServeMux()
+	mux.HandleFunc("/skill.zip", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(zipBytes) })
+	mux.HandleFunc("/child-tool.mjs", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(toolBody) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID: agentName,
+		Agents: []model.AgentDefinition{
+			{
+				Name: agentName, Description: "Coordinates work",
+				Model: "claude-sonnet-4-6", SystemPrompt: "Delegate tasks",
+				Tools: []string{"Task"}, Subagents: []string{"child-a", "child-b"},
+			},
+			{
+				Name: "child-a", Description: "Research specialist", SystemPrompt: "Research",
+				DisallowedTools: []string{"Bash"},
+				SettingSources:  []string{"user"},
+				Skills:          []model.SkillSource{{Name: "iso-skill", URL: srv.URL + "/skill.zip", Hash: zipHash}},
+				CustomTools:     []model.ToolSource{{Name: "child-tool", URL: srv.URL + "/child-tool.mjs", Hash: toolHash, FileName: "child-tool.mjs"}},
+			},
+			{Name: "child-b", Description: "Review specialist", SystemPrompt: "Review"},
+		},
+		Provider:     model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-integration-fake-key"},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	if !assert.Equal(t, http.StatusCreated, w.Code, "graph deploy: %s", w.Body.String()) {
+		return
+	}
+	var createResp struct {
+		Data model.AgentResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
+	baseURL := fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort)
+	authHeader := fmt.Sprintf("Bearer %s", "it-runtime-token")
+
+	// Wait for the runtime to come up (schema errors crash it; a healthy
+	// runtime proves v2.4.0+ accepted the complete graph).
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		resp, herr := client.Get(baseURL + "/health")
+		if herr == nil && resp.StatusCode == http.StatusOK {
+			_ = resp.Body.Close()
+			break
+		}
+		if herr == nil {
+			_ = resp.Body.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime never became healthy at %s/health", baseURL)
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	agentDetail := func(id string) map[string]any {
+		t.Helper()
+		req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/"+id, nil)
+		require.NoError(t, rerr)
+		req.Header.Set("Authorization", authHeader)
+		resp, rerr := client.Do(req)
+		require.NoError(t, rerr)
+		defer resp.Body.Close()
+		detailBody, rerr := io.ReadAll(resp.Body)
+		require.NoError(t, rerr)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "detail %s: %s", id, string(detailBody))
+		var detail map[string]any
+		require.NoError(t, json.Unmarshal(detailBody, &detail))
+		return detail
+	}
+	skillNames := func(detail map[string]any) []string {
+		raw, ok := detail["availableSkills"].([]any)
+		if !ok {
+			return nil
+		}
+		names := make([]string, 0, len(raw))
+		for _, s := range raw {
+			if m, ok := s.(map[string]any); ok {
+				if n, ok := m["name"].(string); ok {
+					names = append(names, n)
+				}
+			}
+		}
+		return names
+	}
+
+	// Regression #8: every entry materializes and is addressable — schema
+	// accepted by real runtime v2.4.0+.
+	for _, id := range []string{agentName, "child-a", "child-b"} {
+		detail := agentDetail(id)
+		assert.Equal(t, "ready", detail["status"], "agent %s must be ready (got %v)", id, detail)
+	}
+
+	// Regression #8: child-a sees ONLY its own skill; parent and child-b see none.
+	parentDetail := agentDetail(agentName)
+	childADetail := agentDetail("child-a")
+	childBDetail := agentDetail("child-b")
+
+	assert.Contains(t, skillNames(childADetail), "iso-skill",
+		"child-a must see its own installed skill")
+	assert.NotContains(t, skillNames(parentDetail), "iso-skill",
+		"parent must NOT see child-a's skill (no inheritance)")
+	assert.NotContains(t, skillNames(childBDetail), "iso-skill",
+		"sibling child-b must NOT see child-a's skill (no sibling leakage)")
+	assert.Empty(t, skillNames(childBDetail), "child-b declares no skills ⇒ none visible")
+
+	// Regression #4 through the real runtime: deny policy survives materialization.
+	assert.Equal(t, []any{"Bash"}, childADetail["disallowedTools"])
+
+	// Mount references: parent lists both children; children mount nothing.
+	subs, ok := parentDetail["subagents"].([]any)
+	require.True(t, ok, "parent detail must list subagents: %v", parentDetail)
+	require.Len(t, subs, 2)
+	first, ok := subs[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "child-a", first["agent_id"])
+	_, hasSubs := childADetail["subagents"]
+	assert.False(t, hasSubs, "child-a must not mount anything")
+
+	// child-b carries no capabilities at all (empty stays empty).
+	assert.NotContains(t, childBDetail, "mcpServers")
+	assert.NotContains(t, childBDetail, "allowedTools")
+	assert.NotContains(t, childBDetail, "extraUserSkillDirs")
 }

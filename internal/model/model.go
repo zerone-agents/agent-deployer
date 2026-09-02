@@ -209,15 +209,12 @@ type AgentDefinition struct {
 	// CustomTools lists single-file Tool artifacts to download and install
 	// (issue #10). Tools remains the complete allow-list; CustomTools only
 	// carries the artifacts selected for this agent.
-	CustomTools    []ToolSource  `json:"customTools,omitempty"`
-	Skills         []SkillSource `json:"skills,omitempty"`
-	SettingSources []string      `json:"settingSources,omitempty"`
-	// ExtraUserSkillDirs lists additional user-level skill directories
-	// scanned when settingSources contains "user" (runtime v2.4.0+).
-	ExtraUserSkillDirs []string                   `json:"extraUserSkillDirs,omitempty"`
-	Subagents          []string                   `json:"subagents,omitempty"`
-	McpServers         map[string]McpServerConfig `json:"mcpServers,omitempty"`
-	Datasets           map[string]string          `json:"datasets,omitempty"`
+	CustomTools    []ToolSource               `json:"customTools,omitempty"`
+	Skills         []SkillSource              `json:"skills,omitempty"`
+	SettingSources []string                   `json:"settingSources,omitempty"`
+	Subagents      []string                   `json:"subagents,omitempty"`
+	McpServers     map[string]McpServerConfig `json:"mcpServers,omitempty"`
+	Datasets       map[string]string          `json:"datasets,omitempty"`
 }
 
 // ProviderConfig defines the provider configuration for the LLM API.

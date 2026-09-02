@@ -137,60 +137,22 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 		return nil, false, fmt.Errorf("create agent directories: %w", err)
 	}
 
-	// Install custom tools for the WHOLE graph before writing the YAML and
-	// creating the container (issue #16 extends the issue #10 rule to the
-	// deployment closure): any tool failure aborts Create. Tools land in the
-	// shared flat <agentsDir>/tools directory; identical declarations across
-	// agents download once (dedup), while each agent's YAML entry keeps its
-	// own customTools reference list.
+	// Materialize the closure's artifacts before writing the YAML and creating
+	// the container: any install failure aborts Create so an invalid download
+	// can never start a container. See artifacts.go for the install layout.
 	toolsDir := filepath.Join(agentDir, "tools")
-	installedTools := make(map[string]string) // tool name -> "./tools/<name><ext>"
-	agentToolPaths := make(map[string][]string)
-	for _, a := range req.Agents {
-		for _, src := range a.CustomTools {
-			rel, ok := installedTools[src.Name]
-			if !ok {
-				var err error
-				rel, err = s.toolInstaller.Install(ctx, src, toolsDir)
-				if err != nil {
-					return nil, false, fmt.Errorf("install tool %q (agent %q): %w", src.Name, a.Name, err)
-				}
-				installedTools[src.Name] = rel
-			}
-			if !containsString(agentToolPaths[a.Name], rel) {
-				agentToolPaths[a.Name] = append(agentToolPaths[a.Name], rel)
-			}
-		}
+	agentToolPaths, installedToolCount, err := s.installClosureTools(ctx, req.Agents, toolsDir)
+	if err != nil {
+		return nil, false, err
 	}
 
 	if err := s.storage.WriteAgentYAML(agentName, req.Agents, req.Provider, req.Aigc, req.Hub, agentToolPaths); err != nil {
 		return nil, false, fmt.Errorf("write agent YAML: %w", err)
 	}
 
-	// Install skills per-agent: <agentsDir>/skills/<agentId>/<skillName>.
-	// Visibility is declared per agent in the YAML via extraUserSkillDirs
-	// (user-level scan) — no docker cp, no shared project-level directory.
-	// Shared declarations (same name+url+hash across agents) are installed
-	// into each declaring agent's own directory: isolation beats download
-	// dedup here, and model validation guarantees same-name ⇒ same
-	// declaration. Any failure aborts Create before the container starts.
-	closureHasSkills := false
-	for _, a := range req.Agents {
-		if len(a.Skills) == 0 {
-			continue
-		}
-		closureHasSkills = true
-		dir := filepath.Join(closureSkillsRoot, a.Name)
-		// The installer stages into a sibling temp dir and renames into
-		// place; the per-agent directory must exist beforehand.
-		if err := storage.EnsureDirs(dir); err != nil {
-			return nil, false, fmt.Errorf("create skill directory for agent %q: %w", a.Name, err)
-		}
-		for _, src := range a.Skills {
-			if err := s.skillInstaller.Install(ctx, src, dir); err != nil {
-				return nil, false, fmt.Errorf("install skill %q (agent %q): %w", src.Name, a.Name, err)
-			}
-		}
+	closureHasSkills, err := s.installClosureSkills(ctx, req.Agents, closureSkillsRoot)
+	if err != nil {
+		return nil, false, err
 	}
 
 	opts := docker.CreateOpts{
@@ -214,7 +176,7 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	// The response advertises toolsDir/skillsDir only when the graph actually
 	// declares those artifacts, keeping artifact-free responses compact.
 	toolsDirIfUsed := ""
-	if len(installedTools) > 0 {
+	if installedToolCount > 0 {
 		toolsDirIfUsed = toolsDir
 	}
 	skillsDirIfUsed := ""

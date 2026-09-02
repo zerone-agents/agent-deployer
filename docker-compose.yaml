@@ -10,6 +10,9 @@ services:
       - AGENT_DEPLOYER_DATA_DIR=/var/lib/agent-deployer
       - AGENT_DEPLOYER_PORT=8080
       - AGENT_DEPLOYER_RUNTIME_IMAGE=${AGENT_DEPLOYER_RUNTIME_IMAGE:-open-agent-runtime:latest}
+      # Only needed when running a :latest runtime image that is KNOWN to be
+      # v2.4.0+; graph deployments are rejected with 503 otherwise.
+      - AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=${AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST:-false}
       - AGENT_DEPLOYER_RUNTIME_CONTAINER_PORT=3000
       # Per-container resource limits (defaults: 2 CPU cores, 2048 MB memory)
       # - AGENT_DEPLOYER_CONTAINER_CPUS=2

@@ -457,9 +457,8 @@ One full Agent-local definition inside the deployment graph. Every entry — roo
 | `tools` | string[] | No | — | Agent-local allow-list of tool names |
 | `disallowedTools` | string[] | No | — | Agent-local deny-list of tool names (runtime v2.4.0+). Round-trips losslessly into agents.yaml and read-back |
 | `customTools` | ToolSource[] | No | See ToolSource definition; duplicate names/local files rejected; same name across agents requires identical declaration | Tool files downloaded, hash-verified, and installed into the shared flat `<agentsDir>/tools` directory before container creation; this agent's YAML entry references its own installed paths |
-| `skills` | SkillSource[] | No | See SkillSource definition; requires `"user"` in `settingSources` | Skill zips downloaded and installed per-agent under `<agentsDir>/skills/<agentId>/`; the YAML entry gets `/app/config/skills/<agentId>` injected into `extraUserSkillDirs` (user-level scan) |
+| `skills` | SkillSource[] | No | See SkillSource definition; requires `"user"` in `settingSources` | Skill zips downloaded and installed per-agent under `<agentsDir>/skills/<agentId>/`; the YAML entry gets `/app/config/skills/<agentId>` injected into `extraUserSkillDirs` (user-level scan). Raw scan paths are NOT part of the deployment API — only the deployer writes `extraUserSkillDirs`, which keeps per-agent skill isolation caller-proof |
 | `settingSources` | string[] | No | — | Sources that trigger the runtime to scan the skills filesystem (`"user"` / `"project"`). Empty stays empty for non-root agents; the root defaults to `["project"]` when unset |
-| `extraUserSkillDirs` | string[] | No | — | Additional user-level skill directories (runtime v2.4.0+). The deployer auto-injects the agent's own skill dir when `skills` is declared |
 | `datasets` | map<string,string> | No | Both `id` and `description` must be non-empty | Mapping of dataset_id to dataset_description, written into this agent's `datasets` field in agents.yaml |
 | `subagents` | string[] | No | Must reference existing ids; no duplicates, no self references, no cycles | Pure id references to other entries in the same graph. Delegation depth is fixed at 1: an agent mounted as a subagent does not mount its own `subagents` |
 
@@ -495,7 +494,7 @@ Migration mapping:
 | `"agent": { ... }` | `"rootAgentId": "<agent.name>"` + one entry in `"agents"` carrying the same object (name must equal rootAgentId) |
 | `agent.subagents[i]` stub | A full `AgentDefinition` in `agents` with `name` = stub name; `prompt` → `systemPrompt`; add `description` (was already required) |
 | Parent's `subagents` stub array | `subagents: ["<stub1-name>", "<stub2-name>"]` (pure id references) |
-| (not expressible before) | Child `mcpServers` / `customTools` / `skills` / `settingSources` / `extraUserSkillDirs` / `datasets` / `disallowedTools` / `maxTurns` — each child now owns its full Agent-local profile |
+| (not expressible before) | Child `mcpServers` / `customTools` / `skills` / `settingSources` / `datasets` / `disallowedTools` / `maxTurns` — each child now owns its full Agent-local profile |
 
 Note: child `model` / `maxSessionTurns` / `permissionMode` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
 

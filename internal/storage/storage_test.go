@@ -198,7 +198,8 @@ func TestWriteAndReadAgentYAML(t *testing.T) {
 	assert.Equal(t, *agents[0].MaxTurns, *readAgent.MaxTurns)
 	assert.Equal(t, agents[0].PermissionMode, readAgent.PermissionMode)
 	assert.Equal(t, agents[0].Tools, readAgent.Tools)
-	assert.Empty(t, readAgent.Skills, "Skills should not be persisted to or read from YAML")
+	assert.Equal(t, agents[0].Skills, readAgent.Skills,
+		"Skills round-trip losslessly via the deploy-manifest sidecar")
 	assert.Equal(t, []string{"reviewer"}, readAgent.Subagents)
 	readSub := graph.Agents[1]
 	assert.Equal(t, agents[1].Name, readSub.Name)
@@ -1211,6 +1212,9 @@ func TestReadAgentYAML_CompleteGraphRoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"Bash"}, child.DisallowedTools)
 	assert.Equal(t, map[string]string{"knowledge-a": "Child A knowledge"}, child.Datasets)
 	assert.Empty(t, child.Subagents)
+	// Artifact declarations round-trip via the manifest sidecar (the YAML
+	// itself cannot carry url+hash metadata).
+	assert.Equal(t, agents[1].Skills, child.Skills)
 }
 
 func TestWriteAgentYAML_RejectsNameMismatch(t *testing.T) {
@@ -1220,4 +1224,96 @@ func TestWriteAgentYAML_RejectsNameMismatch(t *testing.T) {
 	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no agent with id")
+}
+
+// TestReadAgentYAML_ManifestRestoresArtifactMetadata guards the lossless
+// round-trip contract (issue #16 review): Skills/CustomTools url+hash
+// metadata cannot live in the runtime agents.yaml, so a deployment manifest
+// sidecar persists them and ReadAgentYAML merges them back.
+func TestReadAgentYAML_ManifestRestoresArtifactMetadata(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	agents := []model.AgentDefinition{
+		{
+			Name: "parent", Description: "Coordinates", Model: "claude-sonnet-4-6", SystemPrompt: "Delegate",
+			Subagents: []string{"child-a"},
+			CustomTools: []model.ToolSource{
+				{Name: "root-tool", URL: "https://example.com/r.mjs", Hash: strings.Repeat("a", 64), FileName: "r.mjs"},
+			},
+		},
+		{
+			Name: "child-a", Description: "Research", SystemPrompt: "Research",
+			SettingSources: []string{"user"},
+			Skills: []model.SkillSource{
+				{Name: "skill-a", URL: "https://example.com/s.zip", Hash: strings.Repeat("b", 64)},
+			},
+			CustomTools: []model.ToolSource{
+				{Name: "child-tool", URL: "https://example.com/c.mjs", Hash: strings.Repeat("c", 64), FileName: "c.mjs"},
+			},
+		},
+	}
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-root"}
+
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil,
+		map[string][]string{"parent": {"./tools/root-tool.mjs"}, "child-a": {"./tools/child-tool.mjs"}}))
+
+	// The manifest sidecar exists next to agents.yaml.
+	assert.FileExists(t, filepath.Join(dir, "parent", "agents", "deploy-manifest.json"))
+
+	graph, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 2)
+
+	var root, child *model.AgentDefinition
+	for i := range graph.Agents {
+		switch graph.Agents[i].Name {
+		case "parent":
+			root = &graph.Agents[i]
+		case "child-a":
+			child = &graph.Agents[i]
+		}
+	}
+	require.NotNil(t, root)
+	require.NotNil(t, child)
+
+	// Full artifact declarations survive the round trip: url + hash + name.
+	require.Len(t, root.CustomTools, 1)
+	assert.Equal(t, agents[0].CustomTools[0], root.CustomTools[0])
+	require.Len(t, child.Skills, 1)
+	assert.Equal(t, agents[1].Skills[0], child.Skills[0])
+	require.Len(t, child.CustomTools, 1)
+	assert.Equal(t, agents[1].CustomTools[0], child.CustomTools[0])
+}
+
+// TestReadAgentYAML_NoManifestDegradesToYAML keeps hand-written or
+// pre-manifest deployments readable: artifacts come back empty instead of
+// failing the whole read.
+func TestReadAgentYAML_NoManifestDegradesToYAML(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "legacy", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	yamlBytes := []byte("agents:\n  - id: legacy\n    description: old deployment\n    systemPrompt: p\n")
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), yamlBytes, 0644))
+
+	graph, err := NewAgentStorage(dir).ReadAgentYAML("legacy")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 1)
+	assert.Empty(t, graph.Agents[0].Skills)
+	assert.Empty(t, graph.Agents[0].CustomTools)
+}
+
+// TestReadAgentYAML_CorruptManifestFailsExplicitly refuses to silently
+// degrade when the manifest exists but cannot be parsed: a lossy round trip
+// is worse than an explicit error.
+func TestReadAgentYAML_CorruptManifestFailsExplicitly(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "broken", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), []byte("agents:\n  - id: broken\n    description: d\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json"), []byte("{not json"), 0644))
+
+	_, err := NewAgentStorage(dir).ReadAgentYAML("broken")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deploy-manifest")
 }

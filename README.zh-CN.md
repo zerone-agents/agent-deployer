@@ -57,6 +57,10 @@ Zerone Agent Deployer 是 AI agent 容器的编排层 —— 一个轻量 Go HTT
 ```bash
 # 1. 通过 docker compose 构建并运行
 export AGENT_DEPLOYER_DATA_DIR=/var/lib/agent-deployer
+# Agent 图协议要求 runtime v2.4.0+。请 pin 到 v2.4.0+ tag...
+export AGENT_DEPLOYER_RUNTIME_IMAGE=open-agent-runtime:v2.4.0
+# ...或者，如果你运行 :latest 且已确认它是 v2.4.0+，显式开启豁免：
+# export AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true
 docker compose up -d --build
 
 # 2. 创建 agent（完整 Agent 图；rootAgentId 同时充当部署名）
@@ -98,7 +102,8 @@ curl -X POST http://localhost:8080/api/v1/agents \
       "baseUrl": "https://api.anthropic.com",
       "lockedApiKey": "sk-ant-xxx"
     },
-    "force": false
+    "force": false,
+    "runtime_token": "set-your-own-runtime-token"
   }'
 
 # 3. 查询 / 操作 agent
@@ -191,7 +196,8 @@ docker-compose 部署方式还额外接受：
     "baseUrl": "https://api.anthropic.com",
     "lockedApiKey": "sk-ant-xxx"
   },
-  "force": false
+  "force": false,
+  "runtime_token": "must-be-set"          // 必填；注入为 ZERONE_AGENT_HTTP_API_KEY，仅 Create 响应返回一次
 }
 ```
 
@@ -256,6 +262,11 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agent-deployer ./cmd/server
 # （默认 open-agent-runtime:v2.4.0，图协议要求 v2.4.0+；可用替身 tag）。
 # 默认跳过，仅在 integration 构建标签下运行。
 go test -tags=integration ./tests/integration/... -v -timeout 5m
+
+# 真实 runtime 验收测试（通过运行中 runtime 的 agent detail API 断言能力隔离）
+# 额外需要真实 v2.4.0+ 镜像（如 ECS 宿主机上），否则自动 skip：
+CAM_INTEGRATION_REAL_RUNTIME_IMAGE=swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.4.0 \
+  go test -tags=integration ./tests/integration/... -run TestIntegration_AgentGraphRuntimeIsolation -v
 ```
 
 ## 项目结构

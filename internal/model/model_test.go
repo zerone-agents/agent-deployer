@@ -2057,3 +2057,46 @@ func TestCreateAgentRequest_ErrorMessagesDoNotLeakSecrets(t *testing.T) {
 	assert.NotContains(t, err.Error(), "SECRET-TOKEN")
 	assert.NotContains(t, err.Error(), "Bearer")
 }
+
+// TestAgentDefinition_ExtraUserSkillDirsNotExposedInAPI guards the per-agent
+// skill isolation contract (issue #16 review): the deployment API must not
+// expose raw scan paths. A caller-provided extraUserSkillDirs entry — e.g.
+// pointing at another agent's skill directory — is ignored on unmarshal and
+// never re-emitted, so a child cannot widen its scan to another agent's
+// skills. The deployer is the only writer of extraUserSkillDirs in the
+// runtime YAML (auto-injected per-agent directory).
+func TestAgentDefinition_ExtraUserSkillDirsNotExposedInAPI(t *testing.T) {
+	jsonData := `{
+		"rootAgentId": "coder",
+		"agents": [
+			{
+				"name": "coder",
+				"description": "Writes and edits code",
+				"model": "claude-sonnet-4-6",
+				"systemPrompt": "You are a coding assistant.",
+				"subagents": ["child-a"]
+			},
+			{
+				"name": "child-a",
+				"description": "Research",
+				"settingSources": ["user"],
+				"extraUserSkillDirs": ["/app/config/skills/coder", "../../etc"],
+				"skills": [{"name": "own-skill", "url": "https://example.com/s.zip", "hash": "` + strings.Repeat("b", 64) + `"}]
+			}
+		],
+		"provider": {"protocol": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "lockedApiKey": "sk-ant-xxx"},
+		"runtime_token": "test-token"
+	}`
+
+	var req CreateAgentRequest
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &req))
+	require.NoError(t, req.Validate())
+
+	// The injected paths (cross-agent directory + traversal) are silently
+	// dropped: unknown JSON fields are ignored and the struct has no such
+	// field, so the request stays valid and nothing re-emits them.
+	out, err := json.Marshal(&req)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "extraUserSkillDirs")
+	assert.NotContains(t, string(out), "/app/config/skills/coder")
+}

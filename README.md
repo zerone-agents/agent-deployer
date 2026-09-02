@@ -57,6 +57,10 @@ Zerone Agent Deployer is the orchestration layer for AI agent containers — a s
 ```bash
 # 1. Build and run via docker compose
 export AGENT_DEPLOYER_DATA_DIR=/var/lib/agent-deployer
+# The agent graph protocol requires runtime v2.4.0+. Pin a v2.4.0+ tag...
+export AGENT_DEPLOYER_RUNTIME_IMAGE=open-agent-runtime:v2.4.0
+# ...or, if you run :latest and have verified it is v2.4.0+, opt in explicitly:
+# export AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true
 docker compose up -d --build
 
 # 2. Create an agent (complete agent graph; rootAgentId doubles as the name)
@@ -98,7 +102,8 @@ curl -X POST http://localhost:8080/api/v1/agents \
       "baseUrl": "https://api.anthropic.com",
       "lockedApiKey": "sk-ant-xxx"
     },
-    "force": false
+    "force": false,
+    "runtime_token": "set-your-own-runtime-token"
   }'
 
 # 3. Inspect / operate on the agent
@@ -191,7 +196,8 @@ Deploys a **complete agent graph** (issue #16): `rootAgentId` names the entry ag
     "baseUrl": "https://api.anthropic.com",
     "lockedApiKey": "sk-ant-xxx"
   },
-  "force": false
+  "force": false,
+  "runtime_token": "must-be-set"          // required; injected as ZERONE_AGENT_HTTP_API_KEY, returned once
 }
 ```
 
@@ -257,6 +263,12 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agent-deployer ./cmd/server
 # v2.4.0+; a stand-in tag works for topology assertions) already present
 # locally. They are skipped by default and only run with the integration tag.
 go test -tags=integration ./tests/integration/... -v -timeout 5m
+
+# The real-runtime acceptance test (capability isolation via the running
+# runtime's agent detail API) additionally needs a GENUINE v2.4.0+ image,
+# e.g. on the ECS host. It skips itself otherwise:
+CAM_INTEGRATION_REAL_RUNTIME_IMAGE=swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.4.0 \
+  go test -tags=integration ./tests/integration/... -run TestIntegration_AgentGraphRuntimeIsolation -v
 ```
 
 ## Project layout

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -119,18 +120,17 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	entries := make([]runtimeAgentEntry, 0, len(agents))
 	for _, a := range agents {
 		entry := runtimeAgentEntry{
-			ID:                 a.Name,
-			Name:               a.Name,
-			Description:        a.Description,
-			SystemPrompt:       a.SystemPrompt,
-			MaxTurns:           a.MaxTurns,
-			AllowedTools:       a.Tools,
-			DisallowedTools:    a.DisallowedTools,
-			SettingSources:     a.SettingSources,
-			ExtraUserSkillDirs: append([]string(nil), a.ExtraUserSkillDirs...),
-			Subagents:          a.Subagents,
-			McpServers:         a.McpServers,
-			Datasets:           a.Datasets,
+			ID:              a.Name,
+			Name:            a.Name,
+			Description:     a.Description,
+			SystemPrompt:    a.SystemPrompt,
+			MaxTurns:        a.MaxTurns,
+			AllowedTools:    a.Tools,
+			DisallowedTools: a.DisallowedTools,
+			SettingSources:  a.SettingSources,
+			Subagents:       a.Subagents,
+			McpServers:      a.McpServers,
+			Datasets:        a.Datasets,
 		}
 
 		if a.Name == rootName {
@@ -211,6 +211,76 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("write agent YAML: %w", err)
 	}
 
+	if err := writeDeploymentManifest(agentDir, rootName, agents); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// deploymentManifest is the deployer-private sidecar persisting the artifact
+// declarations the runtime agents.yaml cannot express (SkillSource/ToolSource
+// url + hash). ReadAgentYAML merges it back so a read→write cycle restores
+// the complete deployment graph losslessly (issue #16).
+type deploymentManifest struct {
+	RootAgentID string                    `json:"rootAgentId"`
+	Artifacts   map[string]agentArtifacts `json:"artifacts"` // agent id → declared artifacts
+}
+
+type agentArtifacts struct {
+	Skills      []model.SkillSource `json:"skills,omitempty"`
+	CustomTools []model.ToolSource  `json:"customTools,omitempty"`
+}
+
+// writeDeploymentManifest stores the per-agent artifact declarations next to
+// agents.yaml. Artifact-free deployments write nothing, keeping the directory
+// clean; ReadAgentYAML treats a missing manifest as "no artifacts declared".
+func writeDeploymentManifest(agentDir, rootName string, agents []model.AgentDefinition) error {
+	m := deploymentManifest{RootAgentID: rootName, Artifacts: make(map[string]agentArtifacts, len(agents))}
+	for _, a := range agents {
+		if len(a.Skills) == 0 && len(a.CustomTools) == 0 {
+			continue
+		}
+		m.Artifacts[a.Name] = agentArtifacts{Skills: a.Skills, CustomTools: a.CustomTools}
+	}
+	if len(m.Artifacts) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(&m)
+	if err != nil {
+		return fmt.Errorf("marshal deploy manifest: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json"), data, 0644); err != nil {
+		return fmt.Errorf("write deploy manifest: %w", err)
+	}
+	return nil
+}
+
+// loadDeploymentManifest merges the persisted artifact declarations into the
+// graph read from agents.yaml. A missing manifest (pre-manifest or hand-written
+// deployments) is not an error — artifacts stay empty; a corrupt manifest
+// fails explicitly because a silently lossy round trip is worse.
+func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph) error {
+	data, err := os.ReadFile(filepath.Join(s.dataDir, name, "agents", "deploy-manifest.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read deploy-manifest: %w", err)
+	}
+	var m deploymentManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return fmt.Errorf("parse deploy-manifest: %w", err)
+	}
+	for i := range graph.Agents {
+		arts := m.Artifacts[graph.Agents[i].Name]
+		if arts.Skills != nil {
+			graph.Agents[i].Skills = arts.Skills
+		}
+		if arts.CustomTools != nil {
+			graph.Agents[i].CustomTools = arts.CustomTools
+		}
+	}
 	return nil
 }
 
@@ -222,9 +292,9 @@ type AgentGraph struct {
 
 // ReadAgentYAML reads the complete agent graph from
 // <dataDir>/<name>/agents/agents.yaml. The root entry is the one whose id
-// matches the storage name. Artifact URL metadata (SkillSource/ToolSource url
-// and hash) is not persisted in the YAML and is therefore empty on read-back —
-// only on-disk layout paths survive.
+// matches the storage name. Artifact declarations (Skill/Tool url+hash) are
+// not expressible in the runtime YAML; they are restored from the
+// deploy-manifest.json sidecar when present (see deploymentManifest).
 func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 	filePath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
 	data, err := os.ReadFile(filePath)
@@ -252,24 +322,26 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 			foundRoot = true
 		}
 		graph.Agents = append(graph.Agents, model.AgentDefinition{
-			Name:               entryName,
-			Description:        e.Description,
-			Model:              e.Model,
-			SystemPrompt:       e.SystemPrompt,
-			MaxTurns:           e.MaxTurns,
-			MaxSessionTurns:    e.MaxSessionTurns,
-			PermissionMode:     e.PermissionMode,
-			Tools:              e.AllowedTools,
-			DisallowedTools:    e.DisallowedTools,
-			SettingSources:     e.SettingSources,
-			ExtraUserSkillDirs: e.ExtraUserSkillDirs,
-			McpServers:         e.McpServers,
-			Datasets:           e.Datasets,
-			Subagents:          e.Subagents,
+			Name:            entryName,
+			Description:     e.Description,
+			Model:           e.Model,
+			SystemPrompt:    e.SystemPrompt,
+			MaxTurns:        e.MaxTurns,
+			MaxSessionTurns: e.MaxSessionTurns,
+			PermissionMode:  e.PermissionMode,
+			Tools:           e.AllowedTools,
+			DisallowedTools: e.DisallowedTools,
+			SettingSources:  e.SettingSources,
+			McpServers:      e.McpServers,
+			Datasets:        e.Datasets,
+			Subagents:       e.Subagents,
 		})
 	}
 	if !foundRoot {
 		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
+	}
+	if err := s.loadDeploymentManifest(name, graph); err != nil {
+		return nil, err
 	}
 	return graph, nil
 }
