@@ -88,7 +88,8 @@ func (f *fakeDockerClient) ContainerLogs(_ context.Context, id string, tail int)
 // validRequest returns a CreateAgentRequest with all required fields populated.
 func validRequest() *model.CreateAgentRequest {
 	return &model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -312,7 +313,8 @@ func TestAgentService_Create_InvalidRequest(t *testing.T) {
 
 	// Missing required Name on the root agent definition.
 	req := &model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "",

@@ -93,7 +93,8 @@ func newStack(t *testing.T) (*service.AgentService, *gin.Engine) {
 
 func validCreateBody(name string) []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: name,
+		RootAgentID:   name,
+		DeploymentKey: name,
 		Agents: []model.AgentDefinition{
 			{
 				Name:         name,
@@ -306,7 +307,8 @@ func TestIntegration_AgentLifecycle_WithSkills(t *testing.T) {
 
 	// Build a CreateAgentRequest with one skill source on the root agent.
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: agentName,
+		RootAgentID:   agentName,
+		DeploymentKey: agentName,
 		Agents: []model.AgentDefinition{
 			{
 				Name:           agentName,
@@ -385,7 +387,8 @@ func TestIntegration_AgentGraphLifecycle(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: agentName,
+		RootAgentID:   agentName,
+		DeploymentKey: agentName,
 		Agents: []model.AgentDefinition{
 			{
 				Name:         agentName,
@@ -533,7 +536,8 @@ export default {
 	t.Cleanup(srv.Close)
 
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: agentName,
+		RootAgentID:   agentName,
+		DeploymentKey: agentName,
 		Agents: []model.AgentDefinition{
 			{
 				Name: agentName, Description: "Coordinates work",
@@ -1071,7 +1075,8 @@ export default {
 	}
 
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "parent",
+		RootAgentID:   "parent",
+		DeploymentKey: "parent",
 		Agents: []model.AgentDefinition{
 			{
 				Name: "parent", Description: "Coordinates",
@@ -1234,7 +1239,8 @@ func TestIntegration_AgentGraphSessionCap(t *testing.T) {
 
 	queries := 7
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "parent",
+		RootAgentID:   "parent",
+		DeploymentKey: "parent",
 		Agents: []model.AgentDefinition{
 			{
 				Name: "parent", Description: "Capped session",

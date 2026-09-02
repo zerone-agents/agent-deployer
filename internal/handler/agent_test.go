@@ -151,7 +151,8 @@ func setupTestRouterWithImage(t *testing.T, image string, assumeLatest bool) (*g
 // validRequestBody returns a JSON body for a valid create-agent request.
 func validRequestBody() []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -222,7 +223,8 @@ func TestCreateAgent_AcceptsRuntimeToken(t *testing.T) {
 	r, _, fakeDC := setupTestRouter(t)
 
 	req := model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -433,7 +435,8 @@ func TestCreateAgent_400_MissingFields(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	// Valid JSON, but missing required model field.
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -659,7 +662,8 @@ func TestAgentHandler_Create_SkillHashMismatch_Returns422(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:           "coder",
@@ -714,7 +718,8 @@ func TestAgentHandler_Create_SkillDownloadFailed_Returns502(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:           "coder",
@@ -765,7 +770,8 @@ func TestAgentHandler_Create_ToolHashMismatch_Returns422(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -819,7 +825,8 @@ func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -859,7 +866,8 @@ func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
 func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -925,7 +933,8 @@ func TestCreateAgent_RuntimeIncompatibleReturns503(t *testing.T) {
 func TestCreateAgent_DisallowedToolsRoundTripsToYAML(t *testing.T) {
 	r, svc, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "parent",
+		RootAgentID:   "parent",
+		DeploymentKey: "parent",
 		Agents: []model.AgentDefinition{
 			{
 				Name: "parent", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "s",
@@ -988,7 +997,8 @@ func TestCreateAgent_400_LegacyMaxSessionTurns(t *testing.T) {
 func TestCreateAgent_AcceptsMaxSessionQueries(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	body, err := json.Marshal(map[string]any{
-		"rootAgentId": "coder",
+		"rootAgentId":   "coder",
+		"deploymentKey": "coder",
 		"agents": []map[string]any{
 			{"name": "coder", "description": "d", "model": "m", "systemPrompt": "p", "maxSessionQueries": 50},
 		},

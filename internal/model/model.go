@@ -327,16 +327,21 @@ func (h *HubConfig) Validate() error {
 }
 
 // CreateAgentRequest is the deployment payload for POST /agents: a complete
-// agent graph plus runtime-global provider config (issue #16). rootAgentId
-// doubles as the deployment name and must already be in sanitized form.
+// agent graph plus runtime-global provider config (issue #16). rootAgentId is
+// the runtime agent graph identity (agents.yaml root entry); deploymentKey
+// (issue #18) is the deployment resource identity — Docker labels, container
+// name, per-deployment directories, lifecycle lookups — and must already be
+// in sanitized form. The two are independent: a tenant-scoped deployment key
+// like "acme-assistant" never leaks into the runtime agent ids.
 type CreateAgentRequest struct {
-	RootAgentID  string            `json:"rootAgentId"`
-	Agents       []AgentDefinition `json:"agents"`
-	Provider     ProviderConfig    `json:"provider"`
-	Aigc         *AigcConfig       `json:"aigc,omitempty"`
-	Force        bool              `json:"force"`
-	RuntimeToken string            `json:"runtime_token"`
-	Hub          *HubConfig        `json:"hub,omitempty"`
+	RootAgentID   string            `json:"rootAgentId"`
+	DeploymentKey string            `json:"deploymentKey"`
+	Agents        []AgentDefinition `json:"agents"`
+	Provider      ProviderConfig    `json:"provider"`
+	Aigc          *AigcConfig       `json:"aigc,omitempty"`
+	Force         bool              `json:"force"`
+	RuntimeToken  string            `json:"runtime_token"`
+	Hub           *HubConfig        `json:"hub,omitempty"`
 }
 
 // Root returns the root agent definition. Call only after Validate.
@@ -382,7 +387,12 @@ type ContainerInfo struct {
 
 // AgentResponse represents the response data for an agent.
 type AgentResponse struct {
+	// AgentName is the bare runtime root agent id (issue #18): populated by
+	// Create from the request and from the agent-deployer/agent.root-id
+	// container label otherwise. Empty for pre-split containers and archived
+	// entries, which are keyed by deploymentKey alone.
 	AgentName     string      `json:"agentName"`
+	DeploymentKey string      `json:"deploymentKey"`
 	InstanceID    string      `json:"instanceId"`
 	ContainerID   string      `json:"containerId"`
 	ContainerName string      `json:"containerName"`
@@ -421,7 +431,8 @@ type SuccessResponse struct {
 // AgentStatusResponse is the lightweight status payload for GET /agents/:name/status.
 // Clients poll this after Create to detect when the runtime is healthy.
 type AgentStatusResponse struct {
-	AgentName     string `json:"agentName"`
+	AgentName     string `json:"agentName"` // bare runtime root agent id; "" on pre-split containers
+	DeploymentKey string `json:"deploymentKey"`
 	ContainerName string `json:"containerName"`
 	ContainerID   string `json:"containerId"`
 	Status        string `json:"status"` // Docker state: running, exited, created, etc.
@@ -451,8 +462,19 @@ func (r *CreateAgentRequest) Validate() error {
 	if !artifactNamePattern.MatchString(r.RootAgentID) {
 		return fmt.Errorf("rootAgentId %q must contain only letters, digits, dots, underscores, or hyphens", r.RootAgentID)
 	}
-	if naming.SanitizeName(r.RootAgentID) != r.RootAgentID {
-		return fmt.Errorf("rootAgentId %q must already be a sanitized deployment name (lowercase alphanumeric and hyphens)", r.RootAgentID)
+	// Deployment resource identity (issue #18): the deployment key alone keys
+	// Docker labels, container names, and per-deployment directories. It must
+	// already be in sanitized form; there is deliberately NO fallback to
+	// rootAgentId when it is missing (a silent fallback would reintroduce
+	// cross-tenant same-name collisions).
+	if r.DeploymentKey == "" {
+		return fmt.Errorf("deploymentKey is required")
+	}
+	if !artifactNamePattern.MatchString(r.DeploymentKey) {
+		return fmt.Errorf("deploymentKey %q must contain only letters, digits, dots, underscores, or hyphens", r.DeploymentKey)
+	}
+	if naming.SanitizeName(r.DeploymentKey) != r.DeploymentKey {
+		return fmt.Errorf("deploymentKey %q must already be a sanitized deployment name (lowercase alphanumeric and hyphens)", r.DeploymentKey)
 	}
 	if len(r.Agents) == 0 {
 		return fmt.Errorf("agents must contain at least the root agent definition")
