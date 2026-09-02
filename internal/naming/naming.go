@@ -15,8 +15,8 @@ func SanitizeName(name string) string {
 	return strings.ToLower(s)
 }
 
-func ContainerName(prefix, agentName, instanceID string) string {
-	return prefix + "-" + SanitizeName(agentName) + "-" + instanceID
+func ContainerName(prefix, deploymentKey, instanceID string) string {
+	return prefix + "-" + SanitizeName(deploymentKey) + "-" + instanceID
 }
 
 func InstanceID() string {

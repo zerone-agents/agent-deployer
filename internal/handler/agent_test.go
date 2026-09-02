@@ -41,8 +41,8 @@ func newFakeDockerForHandler() *fakeDockerForHandler {
 	}
 }
 
-func (f *fakeDockerForHandler) FindAgentContainer(_ context.Context, agentName string) (*docker.RuntimeContainer, error) {
-	c, ok := f.containers[agentName]
+func (f *fakeDockerForHandler) FindAgentContainer(_ context.Context, deploymentKey string) (*docker.RuntimeContainer, error) {
+	c, ok := f.containers[deploymentKey]
 	if !ok {
 		return nil, nil
 	}
@@ -61,15 +61,16 @@ func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts dock
 	port := f.nextPort
 	f.nextPort++
 	c := &docker.RuntimeContainer{
-		ID:         "cid-" + opts.AgentName,
-		Name:       opts.ContainerName,
-		AgentName:  opts.AgentName,
-		InstanceID: opts.InstanceID,
-		Status:     "running",
-		HostPort:   port,
-		Image:      opts.Image,
+		ID:            "cid-" + opts.DeploymentKey,
+		Name:          opts.ContainerName,
+		DeploymentKey: opts.DeploymentKey,
+		RootAgentID:   opts.RootAgentID,
+		InstanceID:    opts.InstanceID,
+		Status:        "running",
+		HostPort:      port,
+		Image:         opts.Image,
 	}
-	f.containers[opts.AgentName] = c
+	f.containers[opts.DeploymentKey] = c
 	f.tokens[c.ID] = opts.RuntimeToken
 	return c.ID, port, nil
 }
@@ -367,15 +368,18 @@ func TestListAgents_IncludeArchived(t *testing.T) {
 	var archivedList struct {
 		Success bool `json:"success"`
 		Data    []struct {
-			AgentName string `json:"agentName"`
-			Status    string `json:"status"`
+			AgentName     string `json:"agentName"`
+			DeploymentKey string `json:"deploymentKey"`
+			Status        string `json:"status"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &archivedList); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	require.Len(t, archivedList.Data, 1, "includeArchived must show the archived agent")
-	assert.Equal(t, "coder", archivedList.Data[0].AgentName)
+	// Archived entries are keyed by deployment key alone (issue #18).
+	assert.Empty(t, archivedList.Data[0].AgentName)
+	assert.Equal(t, "coder", archivedList.Data[0].DeploymentKey)
 	assert.Equal(t, string(model.StatusArchived), archivedList.Data[0].Status)
 }
 
@@ -524,8 +528,9 @@ func TestGetAgent_Archived(t *testing.T) {
 	var resp struct {
 		Success bool `json:"success"`
 		Data    struct {
-			AgentName string `json:"agentName"`
-			Status    string `json:"status"`
+			AgentName     string `json:"agentName"`
+			DeploymentKey string `json:"deploymentKey"`
+			Status        string `json:"status"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -534,8 +539,13 @@ func TestGetAgent_Archived(t *testing.T) {
 	if !resp.Success {
 		t.Errorf("success = false, want true")
 	}
-	if resp.Data.AgentName != "coder" {
-		t.Errorf("data.agentName = %q, want %q", resp.Data.AgentName, "coder")
+	// Archived entries are keyed by deployment key alone (issue #18): the
+	// bare root agent id is not recovered from disk here.
+	if resp.Data.AgentName != "" {
+		t.Errorf("data.agentName = %q, want empty (archived entries carry no root id)", resp.Data.AgentName)
+	}
+	if resp.Data.DeploymentKey != "coder" {
+		t.Errorf("data.deploymentKey = %q, want %q", resp.Data.DeploymentKey, "coder")
 	}
 	if resp.Data.Status != string(model.StatusArchived) {
 		t.Errorf("data.status = %q, want %q", resp.Data.Status, model.StatusArchived)

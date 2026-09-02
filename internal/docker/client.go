@@ -22,10 +22,17 @@ import (
 // Docker labels applied to every managed container. They are used both for
 // filtering (listing / finding containers) and for bookkeeping.
 const (
-	LabelManaged    = "agent-deployer/managed"
-	LabelAgentName  = "agent-deployer/agent.name"
-	LabelInstanceID = "agent-deployer/agent.instance-id"
-	LabelCreatedAt  = "agent-deployer/agent.created-at"
+	LabelManaged = "agent-deployer/managed"
+	// LabelAgentName's VALUE is the deployment key (issue #18). The label key
+	// keeps its historic name so containers created before the split — whose
+	// value is the tenant-scoped deployment key — remain findable without
+	// migration.
+	LabelAgentName = "agent-deployer/agent.name"
+	// LabelRootAgentID carries the bare runtime root agent id. Only present
+	// on containers created after the split.
+	LabelRootAgentID = "agent-deployer/agent.root-id"
+	LabelInstanceID  = "agent-deployer/agent.instance-id"
+	LabelCreatedAt   = "agent-deployer/agent.created-at"
 )
 
 // Client wraps the official Docker SDK client.
@@ -36,7 +43,12 @@ type Client struct {
 // CreateOpts groups all the parameters required to create and start an
 // open-agent-runtime container.
 type CreateOpts struct {
-	AgentName            string
+	// DeploymentKey is the deployment resource identity (issue #18): it keys
+	// the container labels used for lookup and bookkeeping.
+	DeploymentKey string
+	// RootAgentID is the bare runtime root agent id, recorded on the
+	// agent.root-id label for read-back in Get/List/Status responses.
+	RootAgentID          string
 	InstanceID           string
 	ContainerName        string
 	Image                string
@@ -74,15 +86,16 @@ func (c *Client) Ping(ctx context.Context) (types.Ping, error) {
 // RuntimeContainer is the docker-package projection of a managed agent-runtime
 // container. It isolates callers from the Docker SDK types.
 type RuntimeContainer struct {
-	ID         string
-	Name       string // container name without leading "/"
-	AgentName  string // from label agent-deployer/agent.name
-	InstanceID string // from label agent-deployer/agent.instance-id
-	Status     string // raw Docker state: "running", "exited", "created", etc.
-	Health     string // Docker health: "starting", "healthy", "unhealthy", "" when no healthcheck
-	HostPort   int    // first public port binding, 0 if none
-	Image      string
-	CreatedAt  string // RFC3339 UTC from label agent-deployer/agent.created-at; "" if missing
+	ID            string
+	Name          string // container name without leading "/"
+	DeploymentKey string // from label agent-deployer/agent.name
+	RootAgentID   string // from label agent-deployer/agent.root-id; "" on pre-split containers
+	InstanceID    string // from label agent-deployer/agent.instance-id
+	Status        string // raw Docker state: "running", "exited", "created", etc.
+	Health        string // Docker health: "starting", "healthy", "unhealthy", "" when no healthcheck
+	HostPort      int    // first public port binding, 0 if none
+	Image         string
+	CreatedAt     string // RFC3339 UTC from label agent-deployer/agent.created-at; "" if missing
 }
 
 // toRuntimeContainer maps a Docker SDK container to the RuntimeContainer DTO.
@@ -92,13 +105,14 @@ func toRuntimeContainer(c types.Container) RuntimeContainer {
 		name = strings.TrimPrefix(c.Names[0], "/")
 	}
 	rc := RuntimeContainer{
-		ID:         c.ID,
-		Name:       name,
-		AgentName:  c.Labels[LabelAgentName],
-		InstanceID: c.Labels[LabelInstanceID],
-		Status:     c.State,
-		Image:      c.Image,
-		CreatedAt:  c.Labels[LabelCreatedAt],
+		ID:            c.ID,
+		Name:          name,
+		DeploymentKey: c.Labels[LabelAgentName],
+		RootAgentID:   c.Labels[LabelRootAgentID],
+		InstanceID:    c.Labels[LabelInstanceID],
+		Status:        c.State,
+		Image:         c.Image,
+		CreatedAt:     c.Labels[LabelCreatedAt],
 	}
 	for _, p := range c.Ports {
 		if p.PublicPort != 0 {
@@ -109,14 +123,14 @@ func toRuntimeContainer(c types.Container) RuntimeContainer {
 	return rc
 }
 
-// FindAgentContainer returns the managed container for the given agent name,
-// or (nil, nil) if no such container exists.
-func (c *Client) FindAgentContainer(ctx context.Context, agentName string) (*RuntimeContainer, error) {
+// FindAgentContainer returns the managed container for the given deployment
+// key, or (nil, nil) if no such container exists.
+func (c *Client) FindAgentContainer(ctx context.Context, deploymentKey string) (*RuntimeContainer, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{
 		All: true,
 		Filters: filters.NewArgs(
 			filters.Arg("label", fmt.Sprintf("%s=true", LabelManaged)),
-			filters.Arg("label", fmt.Sprintf("%s=%s", LabelAgentName, agentName)),
+			filters.Arg("label", fmt.Sprintf("%s=%s", LabelAgentName, deploymentKey)),
 		),
 	})
 	if err != nil {
@@ -170,7 +184,8 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Run
 	}
 
 	if info.Config.Labels != nil {
-		rc.AgentName = info.Config.Labels[LabelAgentName]
+		rc.DeploymentKey = info.Config.Labels[LabelAgentName]
+		rc.RootAgentID = info.Config.Labels[LabelRootAgentID]
 		rc.InstanceID = info.Config.Labels[LabelInstanceID]
 		rc.CreatedAt = info.Config.Labels[LabelCreatedAt]
 	}
@@ -204,10 +219,11 @@ func (c *Client) CreateAgentContainer(ctx context.Context, opts CreateOpts) (str
 	env := buildEnvVars(opts.RuntimeToken)
 
 	labels := map[string]string{
-		LabelManaged:    "true",
-		LabelAgentName:  opts.AgentName,
-		LabelInstanceID: opts.InstanceID,
-		LabelCreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LabelManaged:     "true",
+		LabelAgentName:   opts.DeploymentKey,
+		LabelRootAgentID: opts.RootAgentID,
+		LabelInstanceID:  opts.InstanceID,
+		LabelCreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 
 	containerCfg := &container.Config{
