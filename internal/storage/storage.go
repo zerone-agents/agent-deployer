@@ -54,12 +54,12 @@ type runtimeAgentEntry struct {
 	// externalized (runtime v2.4.0+ mutual-exclusion refine): a path relative
 	// to the configDir, pointing at prompts/<id>-<hash>.md inside the agents
 	// directory. Keeps long prompts out of the YAML document.
-	SystemPromptFile string   `yaml:"systemPromptFile,omitempty"`
-	MaxTurns         *int     `yaml:"maxTurns,omitempty"`
-	MaxSessionTurns  *int     `yaml:"maxSessionTurns,omitempty"`
-	PermissionMode   string   `yaml:"permissionMode,omitempty"`
-	AllowedTools     []string `yaml:"allowedTools,omitempty"`
-	DisallowedTools  []string `yaml:"disallowedTools,omitempty"`
+	SystemPromptFile  string   `yaml:"systemPromptFile,omitempty"`
+	MaxTurns          *int     `yaml:"maxTurns,omitempty"`
+	MaxSessionQueries *int     `yaml:"maxSessionQueries,omitempty"`
+	PermissionMode    string   `yaml:"permissionMode,omitempty"`
+	AllowedTools      []string `yaml:"allowedTools,omitempty"`
+	DisallowedTools   []string `yaml:"disallowedTools,omitempty"`
 	// CustomTools lists verified tool file paths relative to the configDir (issue
 	// #10); each entry carries only the paths its own agent declared. The
 	// runtime resolves them itself.
@@ -159,7 +159,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 			// model on the root entry only; mounted agents reuse the root
 			// process environment and never receive their own copy.
 			entry.Model = a.Model
-			entry.MaxSessionTurns = a.MaxSessionTurns
+			entry.MaxSessionQueries = a.MaxSessionQueries
 			entry.PermissionMode = a.PermissionMode
 			entry.APIKey = provider.APIKey
 			entry.BaseURL = provider.BaseURL
@@ -489,19 +489,19 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 			foundRoot = true
 		}
 		def := model.AgentDefinition{
-			Name:            entryName,
-			Description:     e.Description,
-			Model:           e.Model,
-			SystemPrompt:    e.SystemPrompt,
-			MaxTurns:        e.MaxTurns,
-			MaxSessionTurns: e.MaxSessionTurns,
-			PermissionMode:  e.PermissionMode,
-			Tools:           e.AllowedTools,
-			DisallowedTools: e.DisallowedTools,
-			SettingSources:  e.SettingSources,
-			McpServers:      e.McpServers,
-			Datasets:        e.Datasets,
-			Subagents:       e.Subagents,
+			Name:              entryName,
+			Description:       e.Description,
+			Model:             e.Model,
+			SystemPrompt:      e.SystemPrompt,
+			MaxTurns:          e.MaxTurns,
+			MaxSessionQueries: e.MaxSessionQueries,
+			PermissionMode:    e.PermissionMode,
+			Tools:             e.AllowedTools,
+			DisallowedTools:   e.DisallowedTools,
+			SettingSources:    e.SettingSources,
+			McpServers:        e.McpServers,
+			Datasets:          e.Datasets,
+			Subagents:         e.Subagents,
 		}
 		if e.SystemPromptFile != "" {
 			// Resolve the externalized prompt back into graph text so the

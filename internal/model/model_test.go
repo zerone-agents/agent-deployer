@@ -1205,15 +1205,15 @@ func TestAgentDefinition_Validate_DatasetsWhitespaceDescription(t *testing.T) {
 	assert.Contains(t, err.Error(), "datasets[\"dataset-1\"]: description is required")
 }
 
-func TestAgentDefinition_JSONMarshalWithMaxSessionTurns(t *testing.T) {
+func TestAgentDefinition_JSONMarshalWithMaxSessionQueries(t *testing.T) {
 	maxTurns := 10
-	maxSessionTurns := 50
+	maxSessionQueries := 50
 	agent := AgentDefinition{
-		Name:            "assistant",
-		Model:           "claude-sonnet-4-6",
-		SystemPrompt:    "You are helpful.",
-		MaxTurns:        &maxTurns,
-		MaxSessionTurns: &maxSessionTurns,
+		Name:              "assistant",
+		Model:             "claude-sonnet-4-6",
+		SystemPrompt:      "You are helpful.",
+		MaxTurns:          &maxTurns,
+		MaxSessionQueries: &maxSessionQueries,
 	}
 
 	data, err := json.Marshal(agent)
@@ -1224,15 +1224,15 @@ func TestAgentDefinition_JSONMarshalWithMaxSessionTurns(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, float64(10), parsed["maxTurns"])
-	assert.Equal(t, float64(50), parsed["maxSessionTurns"])
+	assert.Equal(t, float64(50), parsed["maxSessionQueries"])
 }
 
-func TestAgentDefinition_JSONMarshalNilMaxSessionTurnsOmitted(t *testing.T) {
+func TestAgentDefinition_JSONMarshalNilMaxSessionQueriesOmitted(t *testing.T) {
 	agent := AgentDefinition{
-		Name:            "assistant",
-		Model:           "claude-sonnet-4-6",
-		SystemPrompt:    "You are helpful.",
-		MaxSessionTurns: nil,
+		Name:              "assistant",
+		Model:             "claude-sonnet-4-6",
+		SystemPrompt:      "You are helpful.",
+		MaxSessionQueries: nil,
 	}
 
 	data, err := json.Marshal(agent)
@@ -1242,19 +1242,19 @@ func TestAgentDefinition_JSONMarshalNilMaxSessionTurnsOmitted(t *testing.T) {
 	err = json.Unmarshal(data, &parsed)
 	require.NoError(t, err)
 
-	_, present := parsed["maxSessionTurns"]
-	assert.False(t, present, "maxSessionTurns should be omitted when nil")
+	_, present := parsed["maxSessionQueries"]
+	assert.False(t, present, "maxSessionQueries should be omitted when nil")
 }
 
-func TestAgentDefinition_JSONUnmarshalMaxSessionTurns(t *testing.T) {
-	input := `{"name":"assistant","model":"claude-sonnet-4-6","systemPrompt":"helpful","maxSessionTurns":30}`
+func TestAgentDefinition_JSONUnmarshalMaxSessionQueries(t *testing.T) {
+	input := `{"name":"assistant","model":"claude-sonnet-4-6","systemPrompt":"helpful","maxSessionQueries":30}`
 
 	var agent AgentDefinition
 	err := json.Unmarshal([]byte(input), &agent)
 	require.NoError(t, err)
 
-	require.NotNil(t, agent.MaxSessionTurns)
-	assert.Equal(t, 30, *agent.MaxSessionTurns)
+	require.NotNil(t, agent.MaxSessionQueries)
+	assert.Equal(t, 30, *agent.MaxSessionQueries)
 }
 
 func TestAigcConfig_Validate(t *testing.T) {
@@ -1973,7 +1973,7 @@ func TestCreateAgentRequest_Validate_GlobalFieldOnNonRoot(t *testing.T) {
 		want   string
 	}{
 		{"model", func(a *AgentDefinition) { a.Model = "claude-sonnet-4-6" }, "model is a runtime-global field"},
-		{"maxSessionTurns", func(a *AgentDefinition) { a.MaxSessionTurns = intPtr(5) }, "maxSessionTurns is a runtime-global field"},
+		{"maxSessionQueries", func(a *AgentDefinition) { a.MaxSessionQueries = intPtr(5) }, "maxSessionQueries is a runtime-global field"},
 		{"permissionMode", func(a *AgentDefinition) { a.PermissionMode = "plan" }, "permissionMode is a runtime-global field"},
 	}
 	for _, tc := range cases {

@@ -653,18 +653,18 @@ func TestWriteAgentYAML_DatasetsOmittedWhenEmpty(t *testing.T) {
 	assert.False(t, present, "datasets should be omitted when empty")
 }
 
-func TestWriteAgentYAML_ContainsMaxSessionTurns(t *testing.T) {
+func TestWriteAgentYAML_ContainsMaxSessionQueries(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
-	maxSessionTurns := 50
+	maxSessionQueries := 50
 	agents := []model.AgentDefinition{
 		{
-			Name:            "coder",
-			Model:           "claude-sonnet-4-6",
-			SystemPrompt:    "You are a coding assistant.",
-			MaxSessionTurns: &maxSessionTurns,
-			Subagents:       []string{"reviewer"},
+			Name:              "coder",
+			Model:             "claude-sonnet-4-6",
+			SystemPrompt:      "You are a coding assistant.",
+			MaxSessionQueries: &maxSessionQueries,
+			Subagents:         []string{"reviewer"},
 		},
 		{
 			Name:         "reviewer",
@@ -686,24 +686,24 @@ func TestWriteAgentYAML_ContainsMaxSessionTurns(t *testing.T) {
 	entries := doc["agents"].([]interface{})
 	require.Len(t, entries, 2)
 	entry := entries[0].(map[string]interface{})
-	assert.Equal(t, 50, entry["maxSessionTurns"])
+	assert.Equal(t, 50, entry["maxSessionQueries"])
 	assert.Equal(t, []interface{}{"reviewer"}, entry["subagents"])
 
-	// Subagent should NOT carry maxSessionTurns (agent-runtime issue #1: won't fix).
+	// Subagent should NOT carry maxSessionQueries (agent-runtime issue #1: won't fix).
 	reviewer := entries[1].(map[string]interface{})
-	_, present := reviewer["maxSessionTurns"]
-	assert.False(t, present, "subagent maxSessionTurns should not be serialized")
+	_, present := reviewer["maxSessionQueries"]
+	assert.False(t, present, "subagent maxSessionQueries should not be serialized")
 }
 
-func TestWriteAgentYAML_NilMaxSessionTurnsOmitted(t *testing.T) {
+func TestWriteAgentYAML_NilMaxSessionQueriesOmitted(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
 	agent := model.AgentDefinition{
-		Name:            "coder",
-		Model:           "claude-sonnet-4-6",
-		SystemPrompt:    "You are a coding assistant.",
-		MaxSessionTurns: nil,
+		Name:              "coder",
+		Model:             "claude-sonnet-4-6",
+		SystemPrompt:      "You are a coding assistant.",
+		MaxSessionQueries: nil,
 	}
 
 	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
@@ -718,22 +718,22 @@ func TestWriteAgentYAML_NilMaxSessionTurnsOmitted(t *testing.T) {
 
 	agents := doc["agents"].([]interface{})
 	entry := agents[0].(map[string]interface{})
-	_, present := entry["maxSessionTurns"]
-	assert.False(t, present, "maxSessionTurns should be omitted when nil")
+	_, present := entry["maxSessionQueries"]
+	assert.False(t, present, "maxSessionQueries should be omitted when nil")
 }
 
-func TestReadAgentYAML_MaxSessionTurns(t *testing.T) {
+func TestReadAgentYAML_MaxSessionQueries(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
-	maxSessionTurns := 50
+	maxSessionQueries := 50
 	agents := []model.AgentDefinition{
 		{
-			Name:            "coder",
-			Model:           "claude-sonnet-4-6",
-			SystemPrompt:    "You are a coding assistant.",
-			MaxSessionTurns: &maxSessionTurns,
-			Subagents:       []string{"reviewer"},
+			Name:              "coder",
+			Model:             "claude-sonnet-4-6",
+			SystemPrompt:      "You are a coding assistant.",
+			MaxSessionQueries: &maxSessionQueries,
+			Subagents:         []string{"reviewer"},
 		},
 		{
 			Name:         "reviewer",
@@ -749,8 +749,8 @@ func TestReadAgentYAML_MaxSessionTurns(t *testing.T) {
 	require.NoError(t, err)
 
 	readAgent := graph.Agents[0]
-	require.NotNil(t, readAgent.MaxSessionTurns)
-	assert.Equal(t, 50, *readAgent.MaxSessionTurns)
+	require.NotNil(t, readAgent.MaxSessionQueries)
+	assert.Equal(t, 50, *readAgent.MaxSessionQueries)
 
 	assert.Equal(t, []string{"reviewer"}, readAgent.Subagents)
 }

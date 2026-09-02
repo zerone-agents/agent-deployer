@@ -196,13 +196,13 @@ type AgentDefinition struct {
 	// Description is a short human/agent-readable summary of what the agent
 	// does. Required on every entry: agent-runtime rejects configs without it,
 	// and it is what the parent agent's Task tool shows when mounting subagents.
-	Description     string   `json:"description"`
-	Model           string   `json:"model"`
-	SystemPrompt    string   `json:"systemPrompt"`
-	MaxTurns        *int     `json:"maxTurns"`
-	MaxSessionTurns *int     `json:"maxSessionTurns,omitempty"`
-	PermissionMode  string   `json:"permissionMode,omitempty"`
-	Tools           []string `json:"tools,omitempty"`
+	Description       string   `json:"description"`
+	Model             string   `json:"model"`
+	SystemPrompt      string   `json:"systemPrompt"`
+	MaxTurns          *int     `json:"maxTurns"`
+	MaxSessionQueries *int     `json:"maxSessionQueries,omitempty"`
+	PermissionMode    string   `json:"permissionMode,omitempty"`
+	Tools             []string `json:"tools,omitempty"`
 	// DisallowedTools denies tools for this agent (agent-local policy,
 	// runtime v2.4.0+).
 	DisallowedTools []string `json:"disallowedTools,omitempty"`
@@ -512,8 +512,8 @@ func (r *CreateAgentRequest) Validate() error {
 		if a.Model != "" {
 			return fmt.Errorf("agent %q: model is a runtime-global field; only the root agent may declare it", a.Name)
 		}
-		if a.MaxSessionTurns != nil {
-			return fmt.Errorf("agent %q: maxSessionTurns is a runtime-global field; only the root agent may declare it", a.Name)
+		if a.MaxSessionQueries != nil {
+			return fmt.Errorf("agent %q: maxSessionQueries is a runtime-global field; only the root agent may declare it", a.Name)
 		}
 		if a.PermissionMode != "" {
 			return fmt.Errorf("agent %q: permissionMode is a runtime-global field; only the root agent may declare it", a.Name)

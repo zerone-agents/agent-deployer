@@ -436,7 +436,7 @@ Graph-level validation (all failures return 400 with an explicit diagnostic):
 - Agent ids are unique across the graph (`duplicate agent id`).
 - Every `subagents` reference must exist (`references unknown subagent`), must not repeat (`duplicates subagent reference`), and must not point at itself (`references itself`).
 - Cycles are rejected outright (`subagent reference cycle detected`), even though the runtime truncates delegation at depth 1.
-- Runtime-global fields are root-only: a non-root agent declaring `model` / `maxSessionTurns` / `permissionMode` is rejected instead of being silently ignored at mount time.
+- Runtime-global fields are root-only: a non-root agent declaring `model` / `maxSessionQueries` / `permissionMode` is rejected instead of being silently ignored at mount time.
 - The root requires both `model` and `systemPrompt`.
 - An agent declaring `skills` must include `"user"` in its `settingSources` (per-agent skill directories are scanned at user level).
 - The same tool/skill `name` across agents requires an identical `url`+`hash` declaration (`conflicting declarations`); identical declarations are shared artifacts and download once (tools) / install per agent (skills).
@@ -452,7 +452,7 @@ One full Agent-local definition inside the deployment graph. Every entry — roo
 | `model` | string | Root only | Required on the root; forbidden on non-root agents | Runtime-global model name, e.g. `claude-sonnet-4-6`. Mounted agents reuse the root runtime's execution environment |
 | `systemPrompt` | string | Root: yes | Non-empty on the root; optional for mounted agents | System prompt. The deployer externalizes it for readability: staged as `prompts/<id>-<sha16>.md` next to `agents.yaml` (bind-mounted into the container) and referenced via the entry's `systemPromptFile` (runtime v2.4.0+ mutual-exclusion refine, relative to the config dir). Read-back restores the text, so the API shape never changes |
 | `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for this agent (agent-local) |
-| `maxSessionTurns` | int \| null | Root only | — | Runtime-global session-level turn limit |
+| `maxSessionQueries` | int \| null | Root only | — | Runtime-global session-level turn limit. YAML contract key introduced with runtime v2.6.0 (SDK 3.1.0 rename of `maxSessionTurns`); on v2.4.0/v2.5.0 the legacy key name applies, on v2.6.0+ only `maxSessionQueries` is honored |
 | `permissionMode` | string | Root only | — | Runtime-global permission mode, e.g. `auto` |
 | `tools` | string[] | No | — | Agent-local allow-list of tool names |
 | `disallowedTools` | string[] | No | — | Agent-local deny-list of tool names (runtime v2.4.0+). Round-trips losslessly into agents.yaml and read-back |
@@ -496,7 +496,7 @@ Migration mapping:
 | Parent's `subagents` stub array | `subagents: ["<stub1-name>", "<stub2-name>"]` (pure id references) |
 | (not expressible before) | Child `mcpServers` / `customTools` / `skills` / `settingSources` / `datasets` / `disallowedTools` / `maxTurns` — each child now owns its full Agent-local profile |
 
-Note: child `model` / `maxSessionTurns` / `permissionMode` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
+Note: child `model` / `maxSessionQueries` / `permissionMode` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
 
 ### ProviderConfig
 
@@ -650,7 +650,7 @@ curl -X DELETE "$DEPLOYER/agents/coder?removeData=true" ${API_KEY:+-H "Authoriza
 
 | Symptom | What to Check |
 |---|---|
-| Create returns 400 `invalid request` | Check `rootAgentId` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionTurns`/`permissionMode` are root-only |
+| Create returns 400 `invalid request` | Check `rootAgentId` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionQueries`/`permissionMode` are root-only |
 | Create returns 400 mentioning `legacy request shape` | The request uses the removed inline `"agent"` field — migrate to `rootAgentId` + `agents` (see Migration from the inline protocol) |
 | Create returns 503 `runtime image incompatible` | Pin `AGENT_DEPLOYER_RUNTIME_IMAGE` to a v2.4.0+ tag, or set `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` when `:latest` is known to be v2.4.0+ |
 | Create returns 500 `find existing container` | Check whether the deployer container can access `/var/run/docker.sock` |
