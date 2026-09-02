@@ -1210,3 +1210,70 @@ export default {
 	assert.Contains(t, lastParentRaw, "child-a-done", "Task(child-a) result must reach the parent")
 	assert.Contains(t, lastParentRaw, "child-b-done", "Task(child-b) result must reach the parent")
 }
+
+// TestIntegration_AgentGraphSessionCap is the runtime v2.6.0 acceptance
+// test for the maxSessionQueries contract (SDK 3.1.0 rename, runtime PR
+// #56): a root-declared session cap must round-trip through the generated
+// agents.yaml into the running runtime's AgentDetail. It is gated on
+// CAM_INTEGRATION_REAL_RUNTIME_IMAGE like the other real-runtime tests and
+// requires a v2.6.0+ image (the deployer gate refuses a cap declaration on
+// older runtimes).
+func TestIntegration_AgentGraphSessionCap(t *testing.T) {
+	realImage := os.Getenv("CAM_INTEGRATION_REAL_RUNTIME_IMAGE")
+	if realImage == "" {
+		t.Skip("set CAM_INTEGRATION_REAL_RUNTIME_IMAGE to a real open-agent-runtime v2.6.0+ image to run this test")
+	}
+	requireDocker(t)
+
+	router, svc := newRealRuntimeStack(t, realImage)
+	var containerName string
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(ctx, "parent", true)
+	})
+	_ = containerName
+
+	queries := 7
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID: "parent",
+		Agents: []model.AgentDefinition{
+			{
+				Name: "parent", Description: "Capped session",
+				Model: "mock-model", SystemPrompt: "You run a capped session.",
+				MaxSessionQueries: &queries,
+			},
+		},
+		Provider:     model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-integration-fake-key"},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	baseURL, _, containerName := deployGraph(t, router, body)
+	const runtimeToken = "it-runtime-token"
+	waitForAgentsReady(t, baseURL, runtimeToken, "parent")
+
+	// The v2.6.0 AgentDetail echoes the cap (PR #56 renamed the detail
+	// field together with the config key).
+	req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/parent", nil)
+	require.NoError(t, rerr)
+	req.Header.Set("x-api-key", runtimeToken)
+	resp, rerr := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	require.NoError(t, rerr)
+	defer resp.Body.Close()
+	raw, rerr := io.ReadAll(resp.Body)
+	require.NoError(t, rerr)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "detail body: %s", string(raw))
+	var detail struct {
+		Status                string `json:"status"`
+		MaxSessionQueries     *int   `json:"maxSessionQueries"`
+		LegacyMaxSessionTurns *int   `json:"maxSessionTurns"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &detail))
+	assert.Equal(t, "ready", detail.Status)
+	require.NotNil(t, detail.MaxSessionQueries,
+		"detail must echo the v2.6.0 maxSessionQueries contract key: %s", string(raw))
+	assert.Equal(t, queries, *detail.MaxSessionQueries)
+	assert.Nil(t, detail.LegacyMaxSessionTurns,
+		"the legacy detail key must be gone on v2.6.0: %s", string(raw))
+}
