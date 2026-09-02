@@ -1537,3 +1537,46 @@ func TestWriteAgentYAML_LegacySidecarNotRemovedBeforeYAMLCommit(t *testing.T) {
 	assert.Equal(t, "old-skill", child.Skills[0].Name,
 		"the old deployment's artifacts must survive via the legacy sidecar path")
 }
+
+// TestWriteAgentYAML_LegacySidecarCleanupFailureIsDeferred covers the
+// sixth-review-round P2: sidecar cleanup is best-effort and runs AFTER the
+// new agents.yaml committed. A cleanup failure must NOT fail the deployment —
+// the durable state is the new document, and the leftover sidecar is
+// harmless because read-back prefers the embedded section.
+func TestWriteAgentYAML_LegacySidecarCleanupFailureIsDeferred(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	agentDir := filepath.Join(dir, "parent", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), []byte("agents:\n  - id: parent\n    description: d\n"), 0644))
+
+	// Plant a legacy sidecar, then make it undeletable: a non-empty
+	// directory squatting on the manifest path defeats os.Remove.
+	require.NoError(t, os.Mkdir(filepath.Join(agentDir, "deploy-manifest.json"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "deploy-manifest.json", "junk"), []byte("x"), 0644))
+
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2"},
+		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
+			Skills: []model.SkillSource{{Name: "new-skill", URL: "https://example.com/n.zip", Hash: strings.Repeat("c", 64)}}},
+	}
+	// The deployment SUCCEEDS despite the undeletable residue.
+	err := store.WriteAgentYAML("parent", agents,
+		model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
+	require.NoError(t, err, "post-commit cleanup failure must not fail the deployment")
+
+	// Durable state is the new document: read-back returns the new graph
+	// with its embedded artifact declarations.
+	graph, rerr := store.ReadAgentYAML("parent")
+	require.NoError(t, rerr)
+	require.Len(t, graph.Agents, 2)
+	var child *model.AgentDefinition
+	for i := range graph.Agents {
+		if graph.Agents[i].Name == "child-a" {
+			child = &graph.Agents[i]
+		}
+	}
+	require.NotNil(t, child)
+	require.Len(t, child.Skills, 1)
+	assert.Equal(t, "new-skill", child.Skills[0].Name)
+}

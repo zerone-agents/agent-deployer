@@ -240,28 +240,25 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("replace agent YAML: %w", err)
 	}
 
-	// Only AFTER the new YAML committed do we migrate away the legacy sidecar
-	// (fifth review round): a failed update above must leave the old YAML AND
-	// its matching sidecar untouched, so the old deployment — including its
-	// artifact metadata — reads back losslessly through the legacy path. A
-	// leftover sidecar next to a committed embedded-section YAML is harmless:
-	// read-back prefers the embedded section and never mixes representations.
-	if err := removeLegacyManifest(agentDir); err != nil {
-		return err
-	}
+	// The new YAML has committed. The legacy sidecar is now pure residue and
+	// cleanup is best-effort: a failure AFTER commit must not report a failed
+	// deployment — the durable state IS the new document, and the leftover
+	// sidecar is harmless (read-back prefers the embedded section; sixth
+	// review round).
+	removeLegacyManifest(agentDir)
 
 	return nil
 }
 
 // removeLegacyManifest deletes the deploy-manifest.json sidecar written by
-// pre-embedded-section deployer versions. New deployments embed artifact
-// declarations inside agents.yaml; leftover sidecars are migrated away on the
-// next write so read-back never mixes representations.
-func removeLegacyManifest(agentDir string) error {
+// pre-embedded-section deployer versions, best-effort. It runs only after the
+// new agents.yaml has committed atomically; a leftover sidecar is harmless
+// (ReadAgentYAML prefers the embedded x-deployer-manifest section and never
+// mixes representations), so cleanup failure must never fail the deployment.
+func removeLegacyManifest(agentDir string) {
 	if err := os.Remove(filepath.Join(agentDir, "deploy-manifest.json")); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove legacy deploy manifest: %w", err)
+		// Best-effort: the embedded section fully supersedes the sidecar.
 	}
-	return nil
 }
 
 // deploymentManifest is the LEGACY sidecar format written by deployer
@@ -330,9 +327,11 @@ type AgentGraph struct {
 
 // ReadAgentYAML reads the complete agent graph from
 // <dataDir>/<name>/agents/agents.yaml. The root entry is the one whose id
-// matches the storage name. Artifact declarations (Skill/Tool url+hash) are
-// not expressible in the runtime YAML; they are restored from the
-// deploy-manifest.json sidecar when present (see deploymentManifest).
+// matches the storage name. Artifact declarations (Skill/Tool url+hash)
+// round-trip through the deployer-private x-deployer-manifest section
+// EMBEDDED in the same file; a legacy deploy-manifest.json sidecar from
+// pre-embedded-section versions is honored for compatibility (digest-bound)
+// only when the section is absent.
 func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 	filePath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
 	data, err := os.ReadFile(filePath)

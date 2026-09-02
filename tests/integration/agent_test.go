@@ -489,21 +489,7 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	// Same wiring as newStack, but with the caller-provided runtime image and
 	// the assume-latest gate bypassed (the assertion below fails loudly if the
 	// image does not actually implement the runtime API).
-	gin.SetMode(gin.TestMode)
-	dir := t.TempDir()
-	cfg := &config.Config{
-		DataDir:                  dir,
-		Port:                     18080,
-		RuntimeImage:             realImage,
-		RuntimeContainerPort:     3000,
-		RuntimeImageAssumeLatest: true,
-	}
-	dc := requireDocker(t)
-	t.Cleanup(func() { _ = dc.Close() })
-	svc := service.NewAgentService(cfg, dc)
-	h := handler.NewAgentHandler(svc)
-	r := gin.New()
-	h.Register(r.Group("/api/v1"))
+	router, svc := newRealRuntimeStack(t, realImage)
 
 	agentName := "it-iso-" + time.Now().Format("150405")
 	t.Cleanup(func() {
@@ -557,45 +543,22 @@ func TestIntegration_AgentGraphRuntimeIsolation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
-	if !assert.Equal(t, http.StatusCreated, w.Code, "graph deploy: %s", w.Body.String()) {
-		return
-	}
-	var createResp struct {
-		Data model.AgentResponse `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
-	baseURL := fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort)
+	baseURL, _ := deployGraph(t, router, body)
 	// Runtime v2.4.0 authenticates /v1/* via the x-api-key header (see
 	// runtime src/auth.ts) — NOT Authorization: Bearer. A 401 here means
 	// protocol drift between deployer tests and runtime auth.
 	const runtimeToken = "it-runtime-token"
 
-	// Wait for the runtime to come up (schema errors crash it; a healthy
-	// runtime proves v2.4.0+ accepted the complete graph).
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(90 * time.Second)
-	for {
-		resp, herr := client.Get(baseURL + "/health")
-		if herr == nil && resp.StatusCode == http.StatusOK {
-			_ = resp.Body.Close()
-			break
-		}
-		if herr == nil {
-			_ = resp.Body.Close()
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("runtime never became healthy at %s/health", baseURL)
-		}
-		time.Sleep(2 * time.Second)
-	}
+	// Every entry must materialize as ready: schema errors crash the runtime
+	// or leave entries unavailable (this is also the /health equivalent).
+	waitForAgentsReady(t, baseURL, runtimeToken, agentName, "child-a", "child-b")
 
 	agentDetail := func(id string) map[string]any {
 		t.Helper()
 		req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/"+id, nil)
 		require.NoError(t, rerr)
 		req.Header.Set("x-api-key", runtimeToken)
-		resp, rerr := client.Do(req)
+		resp, rerr := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 		require.NoError(t, rerr)
 		defer resp.Body.Close()
 		detailBody, rerr := io.ReadAll(resp.Body)
@@ -682,6 +645,86 @@ func containerReachableServer(t *testing.T, h http.Handler) (*httptest.Server, s
 	_, port, err := net.SplitHostPort(ln.Addr().String())
 	require.NoError(t, err)
 	return srv, "http://" + net.JoinHostPort(gateway, port)
+}
+
+// newRealRuntimeStack wires a deployer handler stack against a genuine
+// runtime image, mirroring the wiring of the tested Create path (assume-latest
+// bypassed: the assertions themselves fail loudly if the image does not
+// implement the runtime API).
+func newRealRuntimeStack(t *testing.T, realImage string) (*gin.Engine, *service.AgentService) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		DataDir:                  t.TempDir(),
+		Port:                     18080,
+		RuntimeImage:             realImage,
+		RuntimeContainerPort:     3000,
+		RuntimeImageAssumeLatest: true,
+	}
+	dc := requireDocker(t)
+	t.Cleanup(func() { _ = dc.Close() })
+	svc := service.NewAgentService(cfg, dc)
+	h := handler.NewAgentHandler(svc)
+	router := gin.New()
+	h.Register(router.Group("/api/v1"))
+	return router, svc
+}
+
+// deployGraph posts a create request and returns the runtime-facing URL and
+// token from the response.
+func deployGraph(t *testing.T, router *gin.Engine, body []byte) (baseURL, runtimeToken string) {
+	t.Helper()
+	w := doRequest(t, router, http.MethodPost, "/api/v1/agents", body)
+	if !assert.Equal(t, http.StatusCreated, w.Code, "graph deploy: %s", w.Body.String()) {
+		t.FailNow()
+	}
+	var createResp struct {
+		Data model.AgentResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
+	return fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort), createResp.Data.RuntimeToken
+}
+
+// waitForAgentsReady polls the runtime agent detail endpoint until every id
+// reports status "ready", failing with the detail body on timeout (schema
+// errors crash the runtime or leave entries unavailable).
+func waitForAgentsReady(t *testing.T, baseURL, runtimeToken string, ids ...string) {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		allReady := true
+		for _, id := range ids {
+			req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/"+id, nil)
+			require.NoError(t, rerr)
+			req.Header.Set("x-api-key", runtimeToken)
+			resp, rerr := client.Do(req)
+			if rerr == nil {
+				db, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				var detail struct {
+					Status            string `json:"status"`
+					UnavailableReason string `json:"unavailableReason"`
+				}
+				_ = json.Unmarshal(db, &detail)
+				if detail.Status != "ready" {
+					allReady = false
+					if time.Now().After(deadline) {
+						t.Fatalf("agent %s not ready (%s: %s): %s", id, detail.Status, detail.UnavailableReason, string(db))
+					}
+				}
+			} else {
+				allReady = false
+				if time.Now().After(deadline) {
+					t.Fatalf("runtime never came up: %v", rerr)
+				}
+			}
+		}
+		if allReady {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // capturedLLMRequest records what the SDK's provider sent to the mock LLM.
@@ -895,21 +938,7 @@ func TestIntegration_AgentGraphTaskExecution(t *testing.T) {
 	t.Cleanup(mcpSrv.Close)
 
 	// ---- Deploy the graph ------------------------------------------------
-	gin.SetMode(gin.TestMode)
-	dir := t.TempDir()
-	cfg := &config.Config{
-		DataDir:                  dir,
-		Port:                     18080,
-		RuntimeImage:             realImage,
-		RuntimeContainerPort:     3000,
-		RuntimeImageAssumeLatest: true,
-	}
-	dc := requireDocker(t)
-	t.Cleanup(func() { _ = dc.Close() })
-	svc := service.NewAgentService(cfg, dc)
-	h := handler.NewAgentHandler(svc)
-	router := gin.New()
-	h.Register(router.Group("/api/v1"))
+	router, svc := newRealRuntimeStack(t, realImage)
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -988,54 +1017,12 @@ export default {
 	})
 	require.NoError(t, err)
 
-	w := doRequest(t, router, http.MethodPost, "/api/v1/agents", body)
-	if !assert.Equal(t, http.StatusCreated, w.Code, "graph deploy: %s", w.Body.String()) {
-		return
-	}
-	var createResp struct {
-		Data model.AgentResponse `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
-	baseURL := fmt.Sprintf("http://localhost:%d", createResp.Data.HostPort)
+	baseURL, _ := deployGraph(t, router, body)
 	const runtimeToken = "it-runtime-token"
 
 	// Wait until every entry is ready: child-a's materialization includes a
 	// real MCP handshake against the mock server.
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(120 * time.Second)
-	for {
-		allReady := true
-		for _, id := range []string{"parent", "child-a", "child-b"} {
-			req, rerr := http.NewRequest(http.MethodGet, baseURL+"/v1/agents/"+id, nil)
-			require.NoError(t, rerr)
-			req.Header.Set("x-api-key", runtimeToken)
-			resp, rerr := client.Do(req)
-			if rerr == nil {
-				db, _ := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				var detail struct {
-					Status            string `json:"status"`
-					UnavailableReason string `json:"unavailableReason"`
-				}
-				_ = json.Unmarshal(db, &detail)
-				if detail.Status != "ready" {
-					allReady = false
-					if time.Now().After(deadline) {
-						t.Fatalf("agent %s not ready (%s: %s): %s", id, detail.Status, detail.UnavailableReason, string(db))
-					}
-				}
-			} else {
-				allReady = false
-				if time.Now().After(deadline) {
-					t.Fatalf("runtime never came up: %v", rerr)
-				}
-			}
-		}
-		if allReady {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	waitForAgentsReady(t, baseURL, runtimeToken, "parent", "child-a", "child-b")
 
 	// Drive the execution path: parent run → Task(child-a) → child tools.
 	runBody := `{"message":"start the research","stream":false}`
