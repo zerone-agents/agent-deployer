@@ -31,6 +31,11 @@ var (
 	// ErrInvalidRequest is returned when the request fails validation.
 	// Handlers should map this to HTTP 400.
 	ErrInvalidRequest = errors.New("invalid request")
+
+	// ErrRuntimeIncompatible is returned when the configured runtime image
+	// cannot run the complete agent graph protocol (requires runtime
+	// v2.4.0+). Handlers should map this to HTTP 503.
+	ErrRuntimeIncompatible = errors.New("runtime image incompatible with agent graph protocol")
 )
 
 // DockerClient captures the subset of the docker.Client surface used by the
@@ -83,6 +88,13 @@ func (s *AgentService) Config() *config.Config { return s.cfg }
 func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest) (*model.AgentResponse, bool, error) {
 	if err := model.ValidateCreateRequest(req); err != nil {
 		return nil, false, fmt.Errorf("%w: %s", ErrInvalidRequest, err.Error())
+	}
+
+	// The complete agent graph protocol requires runtime v2.4.0+; refuse
+	// deployment when the configured image cannot be proven compatible
+	// instead of silently degrading on an old runtime.
+	if err := s.checkRuntimeImage(); err != nil {
+		return nil, false, err
 	}
 
 	// Deployment identity: rootAgentId is the canonical name (model

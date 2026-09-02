@@ -106,14 +106,17 @@ func validRequest() *model.CreateAgentRequest {
 }
 
 // newTestService constructs an AgentService rooted at a temporary data dir.
+// The default runtime image opts into the assume-latest gate so graph
+// deployments pass; the image-gate tests override these fields.
 func newTestService(t *testing.T, fake *fakeDockerClient) (*AgentService, string) {
 	t.Helper()
 	dataDir := t.TempDir()
 	cfg := &config.Config{
-		DataDir:              dataDir,
-		Port:                 8080,
-		RuntimeImage:         "open-agent-runtime:latest",
-		RuntimeContainerPort: 3000,
+		DataDir:                  dataDir,
+		Port:                     8080,
+		RuntimeImage:             "open-agent-runtime:latest",
+		RuntimeContainerPort:     3000,
+		RuntimeImageAssumeLatest: true,
 	}
 	return NewAgentService(cfg, fake), dataDir
 }
@@ -1186,4 +1189,40 @@ func TestAgentService_Create_InstallsArtifactsForWholeClosure(t *testing.T) {
 	assert.Equal(t, []any{"/app/config/skills/child-a"}, byID["child-a"]["extraUserSkillDirs"])
 	_, rootHasExtra := byID["parent"]["extraUserSkillDirs"]
 	assert.False(t, rootHasExtra, "root without skills gets no extraUserSkillDirs")
+}
+
+// TestAgentService_Create_RuntimeImageGate guards the runtime v2.4.0+ floor
+// for the agent graph protocol: pinned tags below 2.4.0 and unassumed
+// :latest images must refuse deployment instead of silently degrading.
+func TestAgentService_Create_RuntimeImageGate(t *testing.T) {
+	cases := []struct {
+		name         string
+		image        string
+		assumeLatest bool
+		wantErr      bool
+	}{
+		{"pinned 2.4.0 ok", "open-agent-runtime:v2.4.0", false, false},
+		{"pinned 2.5.1 ok with registry prefix", "swr.cn-east-3.myhuaweicloud.com/zerone/runtime:v2.5.1", false, false},
+		{"pinned 2.3.1 rejected", "open-agent-runtime:v2.3.1", false, true},
+		{"latest rejected without assume", "open-agent-runtime:latest", false, true},
+		{"latest allowed with assume", "open-agent-runtime:latest", true, false},
+		{"untagged treated as latest", "open-agent-runtime", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeDockerClient{}
+			svc, _ := newTestService(t, fake)
+			svc.Config().RuntimeImage = tc.image
+			svc.Config().RuntimeImageAssumeLatest = tc.assumeLatest
+
+			req := validRequest()
+			_, _, err := svc.Create(context.Background(), req)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrRuntimeIncompatible)
+				assert.Nil(t, fake.created, "container must not be created behind the gate")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

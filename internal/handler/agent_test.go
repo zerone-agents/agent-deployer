@@ -115,21 +115,26 @@ func (f *fakeDockerForHandler) ContainerLogs(_ context.Context, id string, tail 
 	return "fake log output\n", nil
 }
 
-func (f *fakeDockerForHandler) CopySkillsToContainer(_ context.Context, containerID, sourceDir string, skillNames []string) error {
-	return nil
+// setupTestRouter builds a gin engine wired to a real AgentService backed by
+// the fake docker client, rooted at a per-test temp directory. The default
+// runtime image opts into the assume-latest gate so graph deployments pass.
+func setupTestRouter(t *testing.T) (*gin.Engine, *service.AgentService, *fakeDockerForHandler) {
+	t.Helper()
+	return setupTestRouterWithImage(t, "open-agent-runtime:latest", true)
 }
 
-// setupTestRouter builds a gin engine wired to a real AgentService backed by
-// the fake docker client, rooted at a per-test temp directory.
-func setupTestRouter(t *testing.T) (*gin.Engine, *service.AgentService, *fakeDockerForHandler) {
+// setupTestRouterWithImage builds a test router with an explicit runtime
+// image and assume-latest setting, for exercising the image-version gate.
+func setupTestRouterWithImage(t *testing.T, image string, assumeLatest bool) (*gin.Engine, *service.AgentService, *fakeDockerForHandler) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	dir := t.TempDir()
 	cfg := &config.Config{
-		DataDir:              dir,
-		Port:                 8080,
-		RuntimeImage:         "open-agent-runtime:latest",
-		RuntimeContainerPort: 3000,
+		DataDir:                  dir,
+		Port:                     8080,
+		RuntimeImage:             image,
+		RuntimeContainerPort:     3000,
+		RuntimeImageAssumeLatest: assumeLatest,
 	}
 	fakeDC := newFakeDockerForHandler()
 	svc := service.NewAgentService(cfg, fakeDC)
@@ -143,11 +148,14 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *service.AgentService, *fakeDoc
 // validRequestBody returns a JSON body for a valid create-agent request.
 func validRequestBody() []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "anthropic-messages",
@@ -211,11 +219,14 @@ func TestCreateAgent_AcceptsRuntimeToken(t *testing.T) {
 	r, _, fakeDC := setupTestRouter(t)
 
 	req := model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "anthropic-messages",
@@ -419,10 +430,13 @@ func TestCreateAgent_400_MissingFields(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	// Valid JSON, but missing required model field.
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			SystemPrompt: "You are a coding assistant.",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				SystemPrompt: "You are a coding assistant.",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "anthropic-messages",
@@ -642,17 +656,21 @@ func TestAgentHandler_Create_SkillHashMismatch_Returns422(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
-			Skills: []model.SkillSource{
-				{
-					Name: "code-review",
-					URL:  srv.URL,
-					// Declared hash is all-zeros — guaranteed to mismatch.
-					Hash: strings.Repeat("0", 64),
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:           "coder",
+				Description:    "Writes and edits code",
+				Model:          "claude-sonnet-4-6",
+				SystemPrompt:   "You are a coding assistant.",
+				SettingSources: []string{"user"},
+				Skills: []model.SkillSource{
+					{
+						Name: "code-review",
+						URL:  srv.URL,
+						// Declared hash is all-zeros — guaranteed to mismatch.
+						Hash: strings.Repeat("0", 64),
+					},
 				},
 			},
 		},
@@ -693,13 +711,17 @@ func TestAgentHandler_Create_SkillDownloadFailed_Returns502(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
-			Skills: []model.SkillSource{
-				{Name: "broken", URL: srv.URL, Hash: strings.Repeat("a", 64)},
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:           "coder",
+				Description:    "Writes and edits code",
+				Model:          "claude-sonnet-4-6",
+				SystemPrompt:   "You are a coding assistant.",
+				SettingSources: []string{"user"},
+				Skills: []model.SkillSource{
+					{Name: "broken", URL: srv.URL, Hash: strings.Repeat("a", 64)},
+				},
 			},
 		},
 		Provider: model.ProviderConfig{
@@ -740,17 +762,20 @@ func TestAgentHandler_Create_ToolHashMismatch_Returns422(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
-			CustomTools: []model.ToolSource{
-				{
-					Name:     "mismatched",
-					URL:      srv.URL,
-					Hash:     strings.Repeat("a", 64),
-					FileName: "m.js",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+				CustomTools: []model.ToolSource{
+					{
+						Name:     "mismatched",
+						URL:      srv.URL,
+						Hash:     strings.Repeat("a", 64),
+						FileName: "m.js",
+					},
 				},
 			},
 		},
@@ -791,13 +816,16 @@ func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
-			CustomTools: []model.ToolSource{
-				{Name: "down", URL: srv.URL, Hash: strings.Repeat("a", 64), FileName: "d.js"},
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+				CustomTools: []model.ToolSource{
+					{Name: "down", URL: srv.URL, Hash: strings.Repeat("a", 64), FileName: "d.js"},
+				},
 			},
 		},
 		Provider: model.ProviderConfig{
@@ -828,11 +856,14 @@ func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
 func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "glm-4.5",
-			SystemPrompt: "You are a coding assistant.",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "glm-4.5",
+				SystemPrompt: "You are a coding assistant.",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "openai-completions",
@@ -859,4 +890,28 @@ func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	if !strings.Contains(resp.Error, "aigc: ") {
 		t.Errorf("error = %q, want it to contain %q", resp.Error, "aigc: ")
 	}
+}
+
+// TestCreateAgent_LegacyInlineRequestRejected guards the issue #16 migration
+// contract: the pre-graph request shape ("agent" field) must fail with an
+// explicit 400 diagnostic instead of being silently reinterpreted.
+func TestCreateAgent_LegacyInlineRequestRejected(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body := []byte(`{"agent":{"name":"coder","description":"d","model":"m","systemPrompt":"p"},"provider":{"protocol":"anthropic-messages","baseUrl":"https://x","lockedApiKey":"k"},"runtime_token":"tok"}`)
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "legacy")
+	assert.Contains(t, w.Body.String(), "rootAgentId")
+}
+
+// TestCreateAgent_RuntimeIncompatibleReturns503 guards the runtime image
+// floor: a :latest runtime image without the explicit assume-latest opt-in
+// must refuse graph deployments with 503, never silently deploy to an old
+// runtime.
+func TestCreateAgent_RuntimeIncompatibleReturns503(t *testing.T) {
+	r, _, _ := setupTestRouterWithImage(t, "open-agent-runtime:latest", false)
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", validRequestBody())
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.NotContains(t, w.Body.String(), "sk-test", "error must not echo provider credentials")
+	assert.NotContains(t, w.Body.String(), "test-runtime-token", "error must not echo the runtime token")
 }
