@@ -35,12 +35,16 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/handler"
 	"github.com/zerone-agent/agent-deployer/internal/model"
 	"github.com/zerone-agent/agent-deployer/internal/service"
+	"gopkg.in/yaml.v3"
 )
 
 // runtimeImage is the image used for the managed containers. Override with
 // CAM_INTEGRATION_IMAGE. It must already exist locally (the test does not
-// pull) so that a missing registry does not produce false negatives.
-const runtimeImage = "open-agent-runtime:latest"
+// pull) so that a missing registry does not produce false negatives. The
+// graph protocol requires runtime v2.4.0+; locally a stand-in image can be
+// tagged with the same name (e.g. docker tag nginx:alpine open-agent-runtime:v2.4.0)
+// since these tests only assert deployment topology, not runtime behavior.
+const runtimeImage = "open-agent-runtime:v2.4.0"
 
 // requireDocker skips the test when no Docker daemon is reachable.
 func requireDocker(t *testing.T) *docker.Client {
@@ -82,10 +86,14 @@ func newStack(t *testing.T) (*service.AgentService, *gin.Engine) {
 
 func validCreateBody(name string) []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         name,
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "integration test agent",
+		RootAgentID: name,
+		Agents: []model.AgentDefinition{
+			{
+				Name:         name,
+				Description:  "integration test agent",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "integration test agent",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "anthropic-messages",
@@ -147,9 +155,10 @@ func TestIntegration_AgentLifecycle(t *testing.T) {
 	assert.NotEmpty(t, createResp.Data.ContainerName)
 	assert.NotEmpty(t, createResp.Data.HostPort)
 
-	// 2. Idempotent create (no force) returns the same agent
+	// 2. Idempotent create (no force) returns the same agent with 200 OK
+	// (201 is reserved for containers that were actually created).
 	w2 := doRequest(t, r, "POST", "/api/v1/agents", validCreateBody(agentName))
-	require.Equal(t, http.StatusCreated, w2.Code, "idempotent create: %s", w2.Body.String())
+	require.Equal(t, http.StatusOK, w2.Code, "idempotent create: %s", w2.Body.String())
 	var createResp2 struct {
 		Data model.AgentResponse `json:"data"`
 	}
@@ -194,9 +203,15 @@ func TestIntegration_AgentLifecycle(t *testing.T) {
 	w7 := doRequest(t, r, "DELETE", "/api/v1/agents/"+agentName, nil)
 	assert.Equal(t, http.StatusOK, w7.Code, "delete: %s", w7.Body.String())
 
-	// 8. Get now 404s
+	// 8. Get now returns the ARCHIVED agent: the container is gone but the
+	// on-disk data remains (only fully-gone agents 404).
 	w8 := doRequest(t, r, "GET", "/api/v1/agents/"+agentName, nil)
-	assert.Equal(t, http.StatusNotFound, w8.Code)
+	require.Equal(t, http.StatusOK, w8.Code)
+	var archivedResp struct {
+		Data model.AgentResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w8.Body.Bytes(), &archivedResp))
+	assert.Equal(t, model.StatusArchived, archivedResp.Data.Status)
 
 	// 9. Sanity: the service-level Delete with removeData also succeeds even
 	// though the container is already gone (idempotent delete).
@@ -234,7 +249,7 @@ func TestIntegration_CreateWithForce(t *testing.T) {
 	body := validCreateBody(agentName)
 	var req model.CreateAgentRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	req.Agent.SystemPrompt = "updated prompt"
+	req.Agents[0].SystemPrompt = "updated prompt"
 	req.Force = true
 	forceBody, _ := json.Marshal(req)
 
@@ -282,14 +297,19 @@ func TestIntegration_AgentLifecycle_WithSkills(t *testing.T) {
 		_ = svc.Delete(ctx, agentName, true)
 	})
 
-	// Build a CreateAgentRequest with one skill source.
+	// Build a CreateAgentRequest with one skill source on the root agent.
 	body, err := json.Marshal(model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         agentName,
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "integration test agent with skill",
-			Skills: []model.SkillSource{
-				{Name: "integ-skill", URL: srv.URL, Hash: zipHash},
+		RootAgentID: agentName,
+		Agents: []model.AgentDefinition{
+			{
+				Name:           agentName,
+				Description:    "integration test agent with skill",
+				Model:          "claude-sonnet-4-6",
+				SystemPrompt:   "integration test agent with skill",
+				SettingSources: []string{"user"},
+				Skills: []model.SkillSource{
+					{Name: "integ-skill", URL: srv.URL, Hash: zipHash},
+				},
 			},
 		},
 		Provider: model.ProviderConfig{
@@ -305,10 +325,143 @@ func TestIntegration_AgentLifecycle_WithSkills(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code,
 		"create should succeed; body=%s", w.Body.String())
 
-	// Verify the skill was extracted to the per-agent skills directory on disk.
+	// Verify the skill was extracted to the per-agent directory on disk.
 	cfg := svc.Config()
-	skillFile := filepath.Join(cfg.DataDir, agentName, "skills", "integ-skill", "SKILL.md")
+	skillFile := filepath.Join(cfg.DataDir, agentName, "agents", "skills", agentName, "integ-skill", "SKILL.md")
 	got, err := os.ReadFile(skillFile)
 	require.NoError(t, err, "skill file should exist at %s", skillFile)
 	assert.Equal(t, "# integration skill\n", string(got))
+}
+
+// TestIntegration_AgentGraphLifecycle deploys a complete parent+child graph
+// with per-agent artifacts (issue #16): child-a carries a skill and a custom
+// tool, parent declares its own tool, and child-b stays empty. Asserts the
+// deployment topology: three YAML entries, per-agent artifact layout, no
+// capability inheritance.
+func TestIntegration_AgentGraphLifecycle(t *testing.T) {
+	svc, r := newStack(t)
+	agentName := "it-graph-" + time.Now().Format("150405")
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(ctx, agentName, true)
+	})
+
+	// Skill zip served in-process.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	f, err := zw.Create("SKILL.md")
+	require.NoError(t, err)
+	_, err = f.Write([]byte("# graph skill\n"))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	zipBytes := zipBuf.Bytes()
+	sum := sha256.Sum256(zipBytes)
+	zipHash := hex.EncodeToString(sum[:])
+
+	mux := http.NewServeMux()
+	skillReqs := 0
+	toolReqs := 0
+	mux.HandleFunc("/skill.zip", func(w http.ResponseWriter, r *http.Request) {
+		skillReqs++
+		_, _ = w.Write(zipBytes)
+	})
+	toolBody := []byte("export default { name: 'child-tool' }\n")
+	toolSum := sha256.Sum256(toolBody)
+	toolHash := hex.EncodeToString(toolSum[:])
+	mux.HandleFunc("/child-tool.mjs", func(w http.ResponseWriter, r *http.Request) {
+		toolReqs++
+		_, _ = w.Write(toolBody)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID: agentName,
+		Agents: []model.AgentDefinition{
+			{
+				Name:         agentName,
+				Description:  "Coordinates work",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "Delegate tasks",
+				Tools:        []string{"Task"},
+				Subagents:    []string{"child-a", "child-b"},
+			},
+			{
+				Name:            "child-a",
+				Description:     "Research specialist",
+				SystemPrompt:    "Research and summarize",
+				DisallowedTools: []string{"Bash"},
+				SettingSources:  []string{"user"},
+				Skills:          []model.SkillSource{{Name: "graph-skill", URL: srv.URL + "/skill.zip", Hash: zipHash}},
+				CustomTools:     []model.ToolSource{{Name: "child-tool", URL: srv.URL + "/child-tool.mjs", Hash: toolHash, FileName: "child-tool.mjs"}},
+			},
+			{
+				Name:         "child-b",
+				Description:  "Review specialist",
+				SystemPrompt: "Review the result",
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-integration-fake-key",
+		},
+		RuntimeToken: "it-runtime-token",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	if !assert.Equal(t, http.StatusCreated, w.Code, "graph create: %s", w.Body.String()) {
+		return
+	}
+
+	cfg := svc.Config()
+	// Per-agent skill dir for child-a only.
+	skillFile := filepath.Join(cfg.DataDir, agentName, "agents", "skills", "child-a", "graph-skill", "SKILL.md")
+	got, err := os.ReadFile(skillFile)
+	require.NoError(t, err, "child-a skill should exist at %s", skillFile)
+	assert.Equal(t, "# graph skill\n", string(got))
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, agentName, "agents", "skills", "child-b")); !assert.True(t, os.IsNotExist(err)) {
+		t.Error("child-b declares no skills ⇒ no skill dir")
+	}
+	// Tool in the shared flat dir.
+	assert.FileExists(t, filepath.Join(cfg.DataDir, agentName, "agents", "tools", "child-tool.mjs"))
+
+	// YAML topology: three entries, id references, per-agent declarations.
+	data, err := os.ReadFile(filepath.Join(cfg.DataDir, agentName, "agents", "agents.yaml"))
+	require.NoError(t, err)
+	var doc struct {
+		Agents []struct {
+			ID                 string   `yaml:"id"`
+			APIKey             string   `yaml:"apiKey"`
+			Model              string   `yaml:"model"`
+			Subagents          []string `yaml:"subagents"`
+			DisallowedTools    []string `yaml:"disallowedTools"`
+			CustomTools        []string `yaml:"customTools"`
+			ExtraUserSkillDirs []string `yaml:"extraUserSkillDirs"`
+		} `yaml:"agents"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.Len(t, doc.Agents, 3)
+	byID := map[string]int{}
+	for i, a := range doc.Agents {
+		byID[a.ID] = i
+	}
+	root := doc.Agents[byID[agentName]]
+	assert.Equal(t, []string{"child-a", "child-b"}, root.Subagents)
+	assert.NotEmpty(t, root.APIKey, "root carries provider credentials")
+	childA := doc.Agents[byID["child-a"]]
+	assert.Equal(t, []string{"Bash"}, childA.DisallowedTools)
+	assert.Equal(t, []string{"./tools/child-tool.mjs"}, childA.CustomTools)
+	assert.Equal(t, []string{"/app/config/skills/child-a"}, childA.ExtraUserSkillDirs,
+		"child-a's skill dir is declared via extraUserSkillDirs")
+	childB := doc.Agents[byID["child-b"]]
+	assert.Empty(t, childB.APIKey, "child-b must not carry credentials")
+	assert.Empty(t, childB.Model, "child-b must not carry model")
+
+	// Each artifact downloaded exactly once.
+	assert.Equal(t, 1, skillReqs, "skill zip downloaded once")
+	assert.Equal(t, 1, toolReqs, "tool file downloaded once")
 }
