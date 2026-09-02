@@ -395,6 +395,9 @@ type AgentResponse struct {
 	YamlPath      string      `json:"yamlPath"`
 	SessionDir    string      `json:"sessionDir"`
 	SkillsDir     string      `json:"skillsDir,omitempty"`
+	// ContainerSkillsDir is the in-container root of per-agent skill
+	// directories; populated only when the graph declares skills.
+	ContainerSkillsDir string `json:"containerSkillsDir,omitempty"`
 	// ToolsDir is the host-side directory holding installed custom Tool
 	// files. Populated ONLY by Create and only when custom Tools are
 	// declared (parity with skillsDir; not required by runtime behavior).

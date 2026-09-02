@@ -3,12 +3,8 @@
 package docker
 
 import (
-	"archive/tar"
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,8 +17,6 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
-
-	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
 // Docker labels applied to every managed container. They are used both for
@@ -49,8 +43,6 @@ type CreateOpts struct {
 	RuntimeContainerPort int
 	AgentDir             string
 	SessionDir           string
-	Agent                model.AgentDefinition
-	Provider             model.ProviderConfig
 	RuntimeToken         string // injected as ZERONE_AGENT_HTTP_API_KEY; supplied by caller
 	MemoryBytes          int64  // 0 = unlimited
 	NanoCPUs             int64  // 0 = unlimited
@@ -342,89 +334,4 @@ func buildEnvVars(runtimeToken string) []string {
 		env = append(env, "ZERONE_AGENT_HTTP_API_KEY="+runtimeToken)
 	}
 	return env
-}
-
-// CopySkillsToContainer copies the specified skill directories from sourceDir
-// into the container at /workdir/.agents/skills/ using Docker's CopyToContainer
-// API. Only the skills listed in skillNames are copied — stale cached skills
-// from previous deployments are excluded.
-// The container must already exist (running or stopped).
-// An empty skillNames list is a no-op.
-func (c *Client) CopySkillsToContainer(ctx context.Context, containerID, sourceDir string, skillNames []string) error {
-	if len(skillNames) == 0 {
-		return nil
-	}
-
-	pr, pw := io.Pipe()
-	go func() {
-		err := tarSkillDirs(sourceDir, ".agents/skills", skillNames, pw)
-		pw.CloseWithError(err)
-	}()
-
-	err := c.cli.CopyToContainer(ctx, containerID, "/workdir/", pr, container.CopyToContainerOptions{})
-	if err != nil {
-		return fmt.Errorf("copy skills to container %s: %w", containerID, err)
-	}
-	return nil
-}
-
-// tarSkillDirs writes a tar archive containing only the named immediate
-// subdirectories of sourceDir. Entries are prefixed with prefix and relative
-// to sourceDir. Directories that don't exist on disk are silently skipped.
-func tarSkillDirs(sourceDir, prefix string, skillNames []string, w io.Writer) error {
-	tw := tar.NewWriter(w)
-	defer tw.Close()
-
-	for _, name := range skillNames {
-		skillPath := filepath.Join(sourceDir, name)
-		info, err := os.Stat(skillPath)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-
-		err = filepath.Walk(skillPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			relPath, err := filepath.Rel(sourceDir, path)
-			if err != nil {
-				return err
-			}
-			if relPath == "." {
-				return nil
-			}
-
-			header, err := tar.FileInfoHeader(info, "")
-			if err != nil {
-				return fmt.Errorf("create tar header for %q: %w", relPath, err)
-			}
-			if prefix != "" {
-				header.Name = filepath.ToSlash(filepath.Join(prefix, relPath))
-			} else {
-				header.Name = filepath.ToSlash(relPath)
-			}
-
-			if err := tw.WriteHeader(header); err != nil {
-				return fmt.Errorf("write tar header for %q: %w", header.Name, err)
-			}
-
-			if !info.Mode().IsRegular() {
-				return nil
-			}
-
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-
-			_, err = io.Copy(tw, f)
-			return err
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

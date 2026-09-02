@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,18 +24,14 @@ import (
 
 // fakeDockerClient is a test double for the DockerClient interface.
 type fakeDockerClient struct {
-	existing      *docker.RuntimeContainer
-	created       *docker.CreateOpts
-	stoppedID     string
-	removedID     string
-	removed       bool
-	listResult    []docker.RuntimeContainer
-	createErr     error
-	findErr       error
-	copySkillsErr error
-	copiedCID     string
-	copiedDir     string
-	copiedNames   []string
+	existing   *docker.RuntimeContainer
+	created    *docker.CreateOpts
+	stoppedID  string
+	removedID  string
+	removed    bool
+	listResult []docker.RuntimeContainer
+	createErr  error
+	findErr    error
 }
 
 func (f *fakeDockerClient) FindAgentContainer(ctx context.Context, agentName string) (*docker.RuntimeContainer, error) {
@@ -89,21 +84,17 @@ func (f *fakeDockerClient) ContainerLogs(_ context.Context, id string, tail int)
 	return "fake log line\n", nil
 }
 
-func (f *fakeDockerClient) CopySkillsToContainer(_ context.Context, containerID, sourceDir string, skillNames []string) error {
-	f.copiedCID = containerID
-	f.copiedDir = sourceDir
-	f.copiedNames = skillNames
-	return f.copySkillsErr
-}
-
 // validRequest returns a CreateAgentRequest with all required fields populated.
 func validRequest() *model.CreateAgentRequest {
 	return &model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Name:         "coder",
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "anthropic-messages",
@@ -204,9 +195,6 @@ func TestAgentService_Create_NewAgent(t *testing.T) {
 	}
 	if opts.SessionDir != filepath.Join(dataDir, "coder", "sessions") {
 		t.Errorf("opts.SessionDir = %q, want %q", opts.SessionDir, filepath.Join(dataDir, "coder", "sessions"))
-	}
-	if opts.Agent.Name != "coder" {
-		t.Errorf("opts.Agent.Name = %q, want %q", opts.Agent.Name, "coder")
 	}
 
 	// Runtime token is supplied by the caller and injected into the runtime
@@ -318,12 +306,16 @@ func TestAgentService_Create_InvalidRequest(t *testing.T) {
 	fake := &fakeDockerClient{}
 	svc, _ := newTestService(t, fake)
 
-	// Missing required Name.
+	// Missing required Name on the root agent definition.
 	req := &model.CreateAgentRequest{
-		Agent: model.AgentDefinition{
-			Description:  "Writes and edits code",
-			Model:        "claude-sonnet-4-6",
-			SystemPrompt: "You are a coding assistant.",
+		RootAgentID: "coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+			},
 		},
 		Provider: model.ProviderConfig{
 			Protocol: "anthropic-messages",
@@ -395,8 +387,8 @@ func TestAgentService_Get_Found(t *testing.T) {
 	if resp.SessionDir != filepath.Join(dataDir, "coder", "sessions") {
 		t.Errorf("SessionDir = %q, want %q", resp.SessionDir, filepath.Join(dataDir, "coder", "sessions"))
 	}
-	if resp.SkillsDir != filepath.Join(dataDir, "coder", "skills") {
-		t.Errorf("SkillsDir = %q, want %q", resp.SkillsDir, filepath.Join(dataDir, "coder", "skills"))
+	if resp.SkillsDir != filepath.Join(dataDir, "coder", "agents", "skills") {
+		t.Errorf("SkillsDir = %q, want %q", resp.SkillsDir, filepath.Join(dataDir, "coder", "agents", "skills"))
 	}
 	if resp.CreatedAt != "2026-06-25T10:00:00Z" {
 		t.Errorf("CreatedAt = %q, want %q", resp.CreatedAt, "2026-06-25T10:00:00Z")
@@ -551,7 +543,7 @@ func TestAgentService_List(t *testing.T) {
 	if responses[0].SessionDir != filepath.Join(dataDir, "coder", "sessions") {
 		t.Errorf("responses[0].SessionDir = %q", responses[0].SessionDir)
 	}
-	if responses[0].SkillsDir != filepath.Join(dataDir, "coder", "skills") {
+	if responses[0].SkillsDir != filepath.Join(dataDir, "coder", "agents", "skills") {
 		t.Errorf("responses[0].SkillsDir = %q", responses[0].SkillsDir)
 	}
 	if responses[0].CreatedAt != "2026-06-25T10:00:00Z" {
@@ -605,7 +597,7 @@ func TestAgentService_List_IncludeArchived(t *testing.T) {
 	assert.Equal(t, 0, archived.HostPort, "archived agent must have no host port")
 	assert.Equal(t, filepath.Join(dataDir, archivedName, "agents", "agents.yaml"), archived.YamlPath)
 	assert.Equal(t, filepath.Join(dataDir, archivedName, "sessions"), archived.SessionDir)
-	assert.Equal(t, filepath.Join(dataDir, archivedName, "skills"), archived.SkillsDir)
+	assert.Equal(t, filepath.Join(dataDir, archivedName, "agents", "skills"), archived.SkillsDir)
 }
 
 // TestAgentService_Get_Archived verifies that Get returns an archived agent
@@ -656,15 +648,16 @@ func TestAgentService_Create_InstallsSkills(t *testing.T) {
 	svc, dataDir := newTestService(t, fake)
 
 	req := validRequest()
-	req.Agent.Skills = []model.SkillSource{
+	req.Agents[0].SettingSources = []string{"user"}
+	req.Agents[0].Skills = []model.SkillSource{
 		{Name: "code-review", URL: srv.URL, Hash: zipHash},
 	}
 	resp, _, err := svc.Create(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, "container-id-123", resp.ContainerID)
 
-	// Skill extracted to dataDir/coder/skills/code-review/SKILL.md
-	got, err := os.ReadFile(filepath.Join(dataDir, "coder", "skills", "code-review", "SKILL.md"))
+	// Skill extracted to the per-agent dir: <agentsDir>/skills/coder/code-review/SKILL.md
+	got, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "skills", "coder", "code-review", "SKILL.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "# code-review\n", string(got))
 
@@ -683,7 +676,8 @@ func TestAgentService_Create_SkillFailure_AbortsBeforeContainerCreate(t *testing
 	svc, _ := newTestService(t, fake)
 
 	req := validRequest()
-	req.Agent.Skills = []model.SkillSource{
+	req.Agents[0].SettingSources = []string{"user"}
+	req.Agents[0].Skills = []model.SkillSource{
 		{Name: "broken", URL: srv.URL, Hash: strings.Repeat("a", 64)},
 	}
 	_, _, err := svc.Create(context.Background(), req)
@@ -708,7 +702,8 @@ func TestAgentService_Create_SkillFailure_PreservesAlreadyDownloadedSkills(t *te
 	svc, dataDir := newTestService(t, fake)
 
 	req := validRequest()
-	req.Agent.Skills = []model.SkillSource{
+	req.Agents[0].SettingSources = []string{"user"}
+	req.Agents[0].Skills = []model.SkillSource{
 		{Name: "good", URL: goodSrv.URL, Hash: goodHash},
 		{Name: "bad", URL: badSrv.URL, Hash: strings.Repeat("a", 64)},
 	}
@@ -717,7 +712,7 @@ func TestAgentService_Create_SkillFailure_PreservesAlreadyDownloadedSkills(t *te
 	assert.Nil(t, fake.created)
 
 	// The "good" skill is preserved on disk — it's a legit cache.
-	got, readErr := os.ReadFile(filepath.Join(dataDir, "coder", "skills", "good", "SKILL.md"))
+	got, readErr := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "skills", "coder", "good", "SKILL.md"))
 	require.NoError(t, readErr)
 	assert.Equal(t, "good\n", string(got))
 }
@@ -730,7 +725,7 @@ func TestAgentService_Create_NoSkills_DoesNotInvokeInstaller(t *testing.T) {
 	svc, _ := newTestService(t, fake)
 
 	req := validRequest() // validRequest does not set Skills
-	require.Empty(t, req.Agent.Skills, "test precondition: validRequest must have no skills")
+	require.Empty(t, req.Agents[0].Skills, "test precondition: validRequest must have no skills")
 
 	resp, _, err := svc.Create(context.Background(), req)
 	require.NoError(t, err)
@@ -775,7 +770,12 @@ func TestAgentService_List_OmitsRuntimeToken(t *testing.T) {
 	}
 }
 
-func TestAgentService_Create_CopiesSkillsToContainer(t *testing.T) {
+// TestAgentService_Create_SkillsServedViaBindMount guards the issue #16
+// layout change: skills are installed under <agentsDir>/skills/<agentId>/ and
+// reach the container through the /app/config bind mount. The DockerClient
+// interface no longer carries any copy-to-container operation, so a Create
+// with skills succeeding proves nothing is copied post-create.
+func TestAgentService_Create_SkillsServedViaBindMount(t *testing.T) {
 	fake := &fakeDockerClient{}
 	svc, dataDir := newTestService(t, fake)
 
@@ -788,61 +788,19 @@ func TestAgentService_Create_CopiesSkillsToContainer(t *testing.T) {
 	defer srv.Close()
 
 	req := validRequest()
-	req.Agent.Skills = []model.SkillSource{
+	req.Agents[0].SettingSources = []string{"user"}
+	req.Agents[0].Skills = []model.SkillSource{
 		{Name: "demo-skill", URL: srv.URL, Hash: zipHash},
 	}
 
 	resp, created, err := svc.Create(context.Background(), req)
 	require.NoError(t, err)
 	assert.True(t, created)
+	assert.Equal(t, "container-id-123", resp.ContainerID)
 
-	assert.Equal(t, "container-id-123", fake.copiedCID)
-	expectedSkillsDir := filepath.Join(dataDir, "coder", "skills")
-	assert.Equal(t, expectedSkillsDir, fake.copiedDir)
-	assert.Equal(t, []string{"demo-skill"}, fake.copiedNames)
-	_ = resp
-}
-
-func TestAgentService_Create_SkillsCopyFailureCleansUpContainer(t *testing.T) {
-	fake := &fakeDockerClient{
-		copySkillsErr: errors.New("docker cp boom"),
-	}
-	svc, _ := newTestService(t, fake)
-
-	zipBytes, zipHash := skillZip(t, map[string]string{
-		"demo-skill/SKILL.md": "# Demo Skill\n",
-	})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(zipBytes)
-	}))
-	defer srv.Close()
-
-	req := validRequest()
-	req.Agent.Skills = []model.SkillSource{
-		{Name: "demo-skill", URL: srv.URL, Hash: zipHash},
-	}
-
-	resp, created, err := svc.Create(context.Background(), req)
-	require.Error(t, err)
-	assert.False(t, created)
-	assert.Nil(t, resp)
-	assert.Contains(t, err.Error(), "docker cp boom")
-
-	assert.Equal(t, "container-id-123", fake.stoppedID)
-	assert.Equal(t, "container-id-123", fake.removedID)
-}
-
-func TestAgentService_Create_NoSkillsNoCopy(t *testing.T) {
-	fake := &fakeDockerClient{}
-	svc, _ := newTestService(t, fake)
-
-	resp, created, err := svc.Create(context.Background(), validRequest())
-	require.NoError(t, err)
-	assert.True(t, created)
-
-	assert.Empty(t, fake.copiedCID)
-	assert.Empty(t, fake.copiedDir)
-	_ = resp
+	// Response advertises both host-side and in-container skill roots.
+	assert.Equal(t, filepath.Join(dataDir, "coder", "agents", "skills"), resp.SkillsDir)
+	assert.Equal(t, "/app/config/skills", resp.ContainerSkillsDir)
 }
 
 func TestAgentService_Create_WithAigc(t *testing.T) {
@@ -1068,8 +1026,8 @@ func TestAgentService_Create_InstallsToolsAndEmitsYAMLPaths(t *testing.T) {
 	svc, dataDir := newTestService(t, fake)
 
 	req := validRequest()
-	req.Agent.Tools = []string{"GetWeather"}
-	req.Agent.CustomTools = []model.ToolSource{src}
+	req.Agents[0].Tools = []string{"GetWeather"}
+	req.Agents[0].CustomTools = []model.ToolSource{src}
 	resp, _, err := svc.Create(context.Background(), req)
 	require.NoError(t, err)
 
@@ -1100,7 +1058,7 @@ func TestAgentService_Create_ToolFailure_AbortsBeforeContainerCreate(t *testing.
 	svc, _ := newTestService(t, fake)
 
 	req := validRequest()
-	req.Agent.CustomTools = []model.ToolSource{
+	req.Agents[0].CustomTools = []model.ToolSource{
 		{Name: "broken", URL: srv.URL, Hash: strings.Repeat("a", 64), FileName: "b.js"},
 	}
 	_, _, err := svc.Create(context.Background(), req)
@@ -1122,7 +1080,7 @@ func TestAgentService_Create_ToolFailure_LeavesEarlierToolsAsCache(t *testing.T)
 	svc, dataDir := newTestService(t, fake)
 
 	req := validRequest()
-	req.Agent.CustomTools = []model.ToolSource{
+	req.Agents[0].CustomTools = []model.ToolSource{
 		goodSrc,
 		{Name: "bad", URL: badSrv.URL, Hash: strings.Repeat("a", 64), FileName: "b.js"},
 	}
@@ -1153,4 +1111,79 @@ func TestAgentService_Create_NoCustomTools_NoToolsDir(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dataDir, "coder", "agents", "tools")); statErr == nil {
 		t.Fatal("tools dir must not be created when no custom tools declared")
 	}
+}
+
+// TestAgentService_Create_InstallsArtifactsForWholeClosure verifies the
+// issue #16 orchestration: artifacts are resolved per agent across the whole
+// deployment graph — tools into the shared flat <agentsDir>/tools, skills
+// into per-agent <agentsDir>/skills/<agentId>/ directories — and the YAML
+// keeps each agent's own customTools / extraUserSkillDirs declarations.
+func TestAgentService_Create_InstallsArtifactsForWholeClosure(t *testing.T) {
+	zipBytes, zipHash := skillZip(t, map[string]string{"SKILL.md": "# child skill\n"})
+	skillSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(zipBytes)
+	}))
+	defer skillSrv.Close()
+
+	childToolBody := []byte("export default { name: 'child-tool' }")
+	childTool, stopChild := toolFile(t, "child-tool", "ct.mjs", childToolBody)
+	defer stopChild()
+	rootToolBody := []byte("export default { name: 'root-tool' }")
+	rootTool, stopRoot := toolFile(t, "root-tool", "rt.mjs", rootToolBody)
+	defer stopRoot()
+
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.RootAgentID = "parent"
+	req.Agents = []model.AgentDefinition{
+		{
+			Name:         "parent",
+			Description:  "Coordinates work",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "Delegate",
+			Subagents:    []string{"child-a"},
+			CustomTools:  []model.ToolSource{rootTool},
+		},
+		{
+			Name:           "child-a",
+			Description:    "Research",
+			SettingSources: []string{"user"},
+			Skills:         []model.SkillSource{{Name: "skill-a", URL: skillSrv.URL, Hash: zipHash}},
+			CustomTools:    []model.ToolSource{childTool},
+		},
+	}
+
+	resp, created, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, created)
+	assert.Equal(t, "container-id-123", resp.ContainerID)
+
+	// Tools land in the shared flat <agentsDir>/tools.
+	assert.FileExists(t, filepath.Join(dataDir, "parent", "agents", "tools", "root-tool.mjs"))
+	assert.FileExists(t, filepath.Join(dataDir, "parent", "agents", "tools", "child-tool.mjs"))
+	// Skills install per-agent; root declares none ⇒ no root skill dir.
+	assert.FileExists(t, filepath.Join(dataDir, "parent", "agents", "skills", "child-a", "skill-a", "SKILL.md"))
+	_, statErr := os.Stat(filepath.Join(dataDir, "parent", "agents", "skills", "parent"))
+	assert.True(t, os.IsNotExist(statErr), "root declares no skills ⇒ no root skill dir")
+
+	// YAML keeps per-agent declarations: root.customTools has only root-tool,
+	// child-a.customTools has only child-tool, child-a gets its skill dir.
+	yamlBytes, err := os.ReadFile(filepath.Join(dataDir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	var doc struct {
+		Agents []map[string]any `yaml:"agents"`
+	}
+	require.NoError(t, yaml.Unmarshal(yamlBytes, &doc))
+	require.Len(t, doc.Agents, 2)
+	byID := map[string]map[string]any{}
+	for _, e := range doc.Agents {
+		byID[e["id"].(string)] = e
+	}
+	assert.Equal(t, []any{"./tools/root-tool.mjs"}, byID["parent"]["customTools"])
+	assert.Equal(t, []any{"./tools/child-tool.mjs"}, byID["child-a"]["customTools"])
+	assert.Equal(t, []any{"/app/config/skills/child-a"}, byID["child-a"]["extraUserSkillDirs"])
+	_, rootHasExtra := byID["parent"]["extraUserSkillDirs"]
+	assert.False(t, rootHasExtra, "root without skills gets no extraUserSkillDirs")
 }
