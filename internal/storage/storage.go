@@ -269,6 +269,10 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 	// review round).
 	removeLegacyManifest(agentDir)
 
+	// Reclaim superseded prompt generations (best-effort): keep exactly the
+	// files the committed document references.
+	gcPromptFiles(agentDir, promptRefs)
+
 	return nil
 }
 
@@ -276,36 +280,94 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 // external file reference (./prompts/<id>-<sha8>.md). The content-hashed
 // file name keeps consecutive deployments of the same agent from
 // overwriting a prompt a previous YAML document still references.
+// promptFileName is the single prompt-reference/filename rule: the extension
+// is the FULL sha256 of the prompt text, so the YAML reference and the
+// written file can never drift, different prompts can never collide onto the
+// same path, and a file an older YAML references is never rewritten by a
+// later generation. Empty prompts produce no reference.
+func promptFileName(agentID, text string) string {
+	return fmt.Sprintf("%s-%s.md", agentID, sha256Hex([]byte(text)))
+}
+
+// computeSystemPromptRefs maps each agent with a systemPrompt to its
+// external file reference (./prompts/<id>-<sha256>.md).
 func computeSystemPromptRefs(agents []model.AgentDefinition) map[string]string {
 	refs := make(map[string]string, len(agents))
 	for _, a := range agents {
 		if a.SystemPrompt == "" {
 			continue
 		}
-		name := fmt.Sprintf("%s-%s.md", a.Name, sha256Hex([]byte(a.SystemPrompt))[:8])
-		refs[a.Name] = "./prompts/" + name
+		refs[a.Name] = "./prompts/" + promptFileName(a.Name, a.SystemPrompt)
 	}
 	return refs
 }
 
 // writeSystemPromptFiles stages every declared systemPrompt into
-// <agentDir>/prompts/<id>-<sha8>.md (0644) and returns the relative
-// references. Empty prompts write nothing.
+// <agentDir>/prompts/<id>-<sha256>.md, atomically per file. A file whose
+// content already matches is skipped — the live prompt referenced by the
+// currently committed YAML is never touched. Otherwise the new content is
+// written to a sibling temporary file, synced, and renamed into place (the
+// full-digest name means the rename targets a fresh path, so a failed
+// update can never corrupt an old generation's file).
 func writeSystemPromptFiles(agentDir string, agents []model.AgentDefinition) error {
+	promptsDir := filepath.Join(agentDir, "prompts")
 	for _, a := range agents {
 		if a.SystemPrompt == "" {
 			continue
 		}
-		promptsDir := filepath.Join(agentDir, "prompts")
 		if err := os.MkdirAll(promptsDir, 0755); err != nil {
 			return fmt.Errorf("create prompts directory: %w", err)
 		}
-		name := fmt.Sprintf("%s-%s.md", a.Name, sha256Hex([]byte(a.SystemPrompt))[:8])
-		if err := os.WriteFile(filepath.Join(promptsDir, name), []byte(a.SystemPrompt), 0644); err != nil {
+		name := promptFileName(a.Name, a.SystemPrompt)
+		final := filepath.Join(promptsDir, name)
+		if existing, err := os.ReadFile(final); err == nil && string(existing) == a.SystemPrompt {
+			continue // content-addressed file already matches; never rewrite it
+		}
+		tmp := final + ".tmp"
+		f, err := os.Create(tmp)
+		if err != nil {
 			return fmt.Errorf("write system prompt for agent %q: %w", a.Name, err)
+		}
+		if _, err := f.WriteString(a.SystemPrompt); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("write system prompt for agent %q: %w", a.Name, err)
+		}
+		if err := f.Sync(); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("sync system prompt for agent %q: %w", a.Name, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("close system prompt for agent %q: %w", a.Name, err)
+		}
+		if err := os.Rename(tmp, final); err != nil {
+			return fmt.Errorf("replace system prompt for agent %q: %w", a.Name, err)
 		}
 	}
 	return nil
+}
+
+// gcPromptFiles reclaims superseded prompt generations after a successful
+// agents.yaml commit: exactly the files referenced by the committed document
+// are retained, everything else in the prompts directory is removed. The
+// content-hashed naming makes this safe — any file not in the reference set
+// can no longer be referenced by any generation of the document. Best-effort
+// (a directory-level failure only leaves garbage on disk).
+func gcPromptFiles(agentDir string, refs map[string]string) {
+	promptsDir := filepath.Join(agentDir, "prompts")
+	keep := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		keep[filepath.Base(filepath.FromSlash(ref))] = true
+	}
+	entries, err := os.ReadDir(promptsDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		_ = os.Remove(filepath.Join(promptsDir, e.Name()))
+	}
 }
 
 // removeLegacyManifest deletes the deploy-manifest.json sidecar written by
@@ -433,17 +495,31 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 		}
 		if e.SystemPromptFile != "" {
 			// Resolve the externalized prompt back into graph text so the
-			// API shape never changes. Only files under the prompts
-			// directory are accepted (the reference travels in the YAML and
-			// must not escape the agents dir); a missing prompt file is an
+			// API shape never changes. Containment is verified on the
+			// RESOLVED path (EvalSymlinks both sides): a lexical prompts/
+			// prefix can be bypassed by a symlink inside the directory, and
+			// os.ReadFile would follow it. A missing prompt file is an
 			// explicit error — silent prompt loss is worse.
 			clean := filepath.Clean(filepath.FromSlash(e.SystemPromptFile))
 			if !strings.HasPrefix(clean, "prompts"+string(filepath.Separator)) {
 				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory", entryName, e.SystemPromptFile)
 			}
-			content, rerr := os.ReadFile(filepath.Join(s.dataDir, name, "agents", clean))
+			target := filepath.Join(s.dataDir, name, "agents", clean)
+			realTarget, rerr := filepath.EvalSymlinks(target)
 			if rerr != nil {
 				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, rerr)
+			}
+			realAgentDir, aerr := filepath.EvalSymlinks(filepath.Join(s.dataDir, name, "agents"))
+			if aerr != nil {
+				return nil, fmt.Errorf("resolve agents directory: %w", aerr)
+			}
+			realPrompts := filepath.Join(realAgentDir, "prompts")
+			if !strings.HasPrefix(realTarget, realPrompts+string(filepath.Separator)) {
+				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory (resolved %q)", entryName, e.SystemPromptFile, realTarget)
+			}
+			content, cerr := os.ReadFile(realTarget)
+			if cerr != nil {
+				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, cerr)
 			}
 			def.SystemPrompt = string(content)
 		}

@@ -1712,3 +1712,91 @@ func TestReadAgentYAML_SystemPromptFileTraversalRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "escapes the prompts directory")
 }
+
+// TestWriteAgentYAML_PromptRewriteAndSkip guards the P1 atomic-write rules:
+// a mismatched live prompt file is repaired via a temp+rename replacement,
+// and a matching file is never rewritten (its mtime stays untouched — the
+// file a committed YAML references must not be disturbed).
+func TestWriteAgentYAML_PromptRewriteAndSkip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "The prompt text"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	promptsDir := filepath.Join(dir, "parent", "agents", "prompts")
+	entries, err := os.ReadDir(promptsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	promptPath := filepath.Join(promptsDir, entries[0].Name())
+
+	// Corrupt the live file, then redeploy the same graph: the file must be
+	// repaired (content mismatch → rewrite via temp+rename).
+	require.NoError(t, os.WriteFile(promptPath, []byte("corrupted"), 0644))
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	content, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	assert.Equal(t, "The prompt text", string(content), "mismatched live prompt must be repaired")
+
+	// Matching content → skipped: mtime must not change.
+	before, err := os.Stat(promptPath)
+	require.NoError(t, err)
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	after, err := os.Stat(promptPath)
+	require.NoError(t, err)
+	assert.Equal(t, before.ModTime(), after.ModTime(), "matching prompt file must not be rewritten")
+}
+
+// TestReadAgentYAML_SystemPromptFileSymlinkEscapeRejected covers the P2
+// containment hole: a symlink INSIDE prompts/ pointing at a file outside
+// passes the lexical prefix check but not the resolved-path verification.
+func TestReadAgentYAML_SystemPromptFileSymlinkEscapeRejected(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("secret"), 0644))
+	agentDir := filepath.Join(dir, "evil", "agents")
+	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "prompts"), 0755))
+	require.NoError(t, os.Symlink(victim, filepath.Join(agentDir, "prompts", "link.md")))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"),
+		[]byte("agents:\n  - id: evil\n    description: d\n    systemPromptFile: ./prompts/link.md\n"), 0644))
+
+	_, err := NewAgentStorage(dir).ReadAgentYAML("evil")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes the prompts directory")
+}
+
+// TestWriteAgentYAML_PromptGCReclaimsSupersededGenerations covers the P2
+// reclamation rule: after a successful commit only the files referenced by
+// the committed document remain; removed prompts are reclaimed entirely.
+func TestWriteAgentYAML_PromptGCReclaimsSupersededGenerations(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+	promptsDir := filepath.Join(dir, "parent", "agents", "prompts")
+
+	first := []model.AgentDefinition{
+		{Name: "parent", Description: "d1", Model: "m", SystemPrompt: "version one"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+	entries, err := os.ReadDir(promptsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	firstPrompt := entries[0].Name()
+
+	second := []model.AgentDefinition{
+		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "version two"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", second, provider, nil, nil, nil))
+	entries, err = os.ReadDir(promptsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "superseded prompt generation must be reclaimed")
+	assert.NotEqual(t, firstPrompt, entries[0].Name())
+
+	third := []model.AgentDefinition{{Name: "parent", Description: "d3", Model: "m"}}
+	require.NoError(t, store.WriteAgentYAML("parent", third, provider, nil, nil, nil))
+	entries, err = os.ReadDir(promptsDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "prompts removed from the graph must be reclaimed")
+}
