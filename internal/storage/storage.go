@@ -277,20 +277,22 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 }
 
 // computeSystemPromptRefs maps each agent with a systemPrompt to its
-// external file reference (./prompts/<id>-<sha256>.md). The content-hashed
+// external file reference (./prompts/<id>-<sha16>.md). The content-hashed
 // file name keeps consecutive deployments of the same agent from
 // overwriting a prompt a previous YAML document still references.
 // promptFileName is the single prompt-reference/filename rule: the extension
-// is the FULL sha256 of the prompt text, so the YAML reference and the
-// written file can never drift, different prompts can never collide onto the
-// same path, and a file an older YAML references is never rewritten by a
-// later generation. Empty prompts produce no reference.
+// is the FIRST 16 hex chars of the sha256 of the prompt text (64-bit space —
+// the hash only separates prompt generations within one deployment directory,
+// where collisions are negligible). The YAML reference and the written file
+// can never drift, different prompts cannot plausibly collide onto the same
+// path, and a file an older YAML references is never rewritten by a later
+// generation. Empty prompts produce no reference.
 func promptFileName(agentID, text string) string {
-	return fmt.Sprintf("%s-%s.md", agentID, sha256Hex([]byte(text)))
+	return fmt.Sprintf("%s-%s.md", agentID, sha256Hex([]byte(text))[:16])
 }
 
 // computeSystemPromptRefs maps each agent with a systemPrompt to its
-// external file reference (./prompts/<id>-<sha256>.md).
+// external file reference (./prompts/<id>-<sha16>.md).
 func computeSystemPromptRefs(agents []model.AgentDefinition) map[string]string {
 	refs := make(map[string]string, len(agents))
 	for _, a := range agents {
@@ -303,7 +305,7 @@ func computeSystemPromptRefs(agents []model.AgentDefinition) map[string]string {
 }
 
 // writeSystemPromptFiles stages every declared systemPrompt into
-// <agentDir>/prompts/<id>-<sha256>.md, atomically per file. A file whose
+// <agentDir>/prompts/<id>-<sha16>.md, atomically per file. A file whose
 // content already matches is skipped — the live prompt referenced by the
 // currently committed YAML is never touched. Otherwise the new content is
 // written to a sibling temporary file, synced, and renamed into place (the
@@ -613,8 +615,11 @@ func (s *AgentStorage) ListAgentDirs() ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		// Skip the internal temp dir used by skill installs.
-		if name == ".skills-tmp" {
+		// Skip the internal staging roots used by skill installs: the legacy
+		// fixed ".skills-tmp" name and the per-install random ".skills-*"
+		// roots (which should be gone after a successful install but may
+		// linger after a crash).
+		if strings.HasPrefix(name, ".skills-") {
 			continue
 		}
 		yamlPath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")

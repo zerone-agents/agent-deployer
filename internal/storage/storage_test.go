@@ -1598,7 +1598,7 @@ func TestWriteAgentYAML_LegacySidecarCleanupFailureIsDeferred(t *testing.T) {
 
 // TestWriteAgentYAML_SystemPromptExternalized covers the default
 // systemPromptFile externalization (issue #17 follow-up): long prompts are
-// staged into prompts/<id>-<sha256>.md and the YAML entry only carries a
+// staged into prompts/<id>-<sha16>.md and the YAML entry only carries a
 // relative reference; agents without a prompt write nothing.
 func TestWriteAgentYAML_SystemPromptExternalized(t *testing.T) {
 	dir := t.TempDir()
