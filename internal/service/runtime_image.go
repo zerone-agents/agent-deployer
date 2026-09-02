@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/zerone-agent/agent-deployer/internal/model"
 )
 
 // checkRuntimeImage enforces the runtime version floor for the agent graph
@@ -28,6 +30,18 @@ func (s *AgentService) checkRuntimeImage(minMajor, minMinor int) error {
 		return fmt.Errorf("%w: runtime image tag %q is below the required %s; upgrade the runtime image", ErrRuntimeIncompatible, tag, floor)
 	}
 	return nil
+}
+
+// declaresMaxSessionQueries reports whether any agent in the graph uses the
+// maxSessionQueries contract key, which requires runtime v2.6.0+ (SDK 3.1.0
+// rename; pre-2.6.0 runtimes silently strip it).
+func declaresMaxSessionQueries(agents []model.AgentDefinition) bool {
+	for _, a := range agents {
+		if a.MaxSessionQueries != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // imageTag extracts the tag from an image reference (the part after the last

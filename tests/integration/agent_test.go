@@ -1226,13 +1226,11 @@ func TestIntegration_AgentGraphSessionCap(t *testing.T) {
 	requireDocker(t)
 
 	router, svc := newRealRuntimeStack(t, realImage)
-	var containerName string
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		_ = svc.Delete(ctx, "parent", true)
 	})
-	_ = containerName
 
 	queries := 7
 	body, err := json.Marshal(model.CreateAgentRequest{
@@ -1249,8 +1247,7 @@ func TestIntegration_AgentGraphSessionCap(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	baseURL, _, containerName := deployGraph(t, router, body)
-	const runtimeToken = "it-runtime-token"
+	baseURL, runtimeToken, _ := deployGraph(t, router, body)
 	waitForAgentsReady(t, baseURL, runtimeToken, "parent")
 
 	// The v2.6.0 AgentDetail echoes the cap (PR #56 renamed the detail
