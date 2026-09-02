@@ -20,24 +20,25 @@ func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	subMaxTurns := 10
-	agent := model.AgentDefinition{
-		Name:         "coder",
-		Description:  "Writes and edits code",
-		Model:        "claude-sonnet-4-6",
-		SystemPrompt: "You are a coding assistant.",
-		Tools:        []string{"Read", "Write"},
-		Subagents: []model.SubagentDefinition{
-			{
-				Name:        "reviewer",
-				Description: "Review code",
-				Prompt:      "You are a code reviewer.",
-				Tools:       []string{"Read"},
-				MaxTurns:    &subMaxTurns,
-			},
+	agents := []model.AgentDefinition{
+		{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+			Tools:        []string{"Read", "Write"},
+			Subagents:    []string{"reviewer"},
+		},
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
+			Tools:        []string{"Read"},
+			MaxTurns:     &subMaxTurns,
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -45,11 +46,11 @@ func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
 	var doc map[string]interface{}
 	require.NoError(t, yaml.Unmarshal(data, &doc))
 
-	agents, ok := doc["agents"].([]interface{})
+	entries, ok := doc["agents"].([]interface{})
 	require.True(t, ok, "top-level agents key should be a list")
-	require.Len(t, agents, 2, "main agent + each subagent should be a top-level entry")
+	require.Len(t, entries, 2, "main agent + each subagent should be a top-level entry")
 
-	main, ok := agents[0].(map[string]interface{})
+	main, ok := entries[0].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "coder", main["id"])
 	assert.Equal(t, "Writes and edits code", main["description"],
@@ -57,7 +58,7 @@ func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
 	assert.Equal(t, []interface{}{"reviewer"}, main["subagents"],
 		"subagents should be an id reference list, not inline definitions")
 
-	sub, ok := agents[1].(map[string]interface{})
+	sub, ok := entries[1].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "reviewer", sub["id"])
 	assert.Equal(t, "reviewer", sub["name"])
@@ -76,24 +77,37 @@ func TestReadAgentYAML_Runtime20RoundTrip(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	subMaxTurns := 10
-	agent := model.AgentDefinition{
-		Name:         "coder",
-		Description:  "Writes and edits code",
-		Model:        "claude-sonnet-4-6",
-		SystemPrompt: "You are a coding assistant.",
-		Subagents: []model.SubagentDefinition{
-			{Name: "reviewer", Description: "Review code", Prompt: "You are a code reviewer.", Tools: []string{"Read"}, MaxTurns: &subMaxTurns},
+	agents := []model.AgentDefinition{
+		{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+			Subagents:    []string{"reviewer"},
+		},
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
+			Tools:        []string{"Read"},
+			MaxTurns:     &subMaxTurns,
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil))
 
-	readAgent, err := store.ReadAgentYAML("coder")
+	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
-	assert.Equal(t, "coder", readAgent.Name)
-	assert.Equal(t, "Writes and edits code", readAgent.Description)
-	require.Len(t, readAgent.Subagents, 1)
-	assert.Equal(t, agent.Subagents[0], readAgent.Subagents[0])
+	assert.Equal(t, "coder", graph.RootAgentID)
+	require.Len(t, graph.Agents, 2)
+	assert.Equal(t, "coder", graph.Agents[0].Name)
+	assert.Equal(t, "Writes and edits code", graph.Agents[0].Description)
+	assert.Equal(t, []string{"reviewer"}, graph.Agents[0].Subagents)
+	assert.Equal(t, agents[1].Name, graph.Agents[1].Name)
+	assert.Equal(t, agents[1].Description, graph.Agents[1].Description)
+	assert.Equal(t, agents[1].SystemPrompt, graph.Agents[1].SystemPrompt)
+	assert.Equal(t, agents[1].Tools, graph.Agents[1].Tools)
+	assert.Equal(t, *agents[1].MaxTurns, *graph.Agents[1].MaxTurns)
 }
 
 func TestReadAgentYAML_MainEntryFoundByIDNotPosition(t *testing.T) {
@@ -117,13 +131,19 @@ func TestReadAgentYAML_MainEntryFoundByIDNotPosition(t *testing.T) {
 
 	readAgent, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
-	assert.Equal(t, "coder", readAgent.Name)
-	assert.Equal(t, "Writes and edits code", readAgent.Description)
-	assert.Equal(t, "claude-sonnet-4-6", readAgent.Model)
-	require.Len(t, readAgent.Subagents, 1)
-	assert.Equal(t, "reviewer", readAgent.Subagents[0].Name)
-	assert.Equal(t, "Review code", readAgent.Subagents[0].Description)
-	assert.Equal(t, "You are a code reviewer.", readAgent.Subagents[0].Prompt)
+	assert.Equal(t, "coder", readAgent.RootAgentID)
+	require.Len(t, readAgent.Agents, 2)
+	byID := map[string]model.AgentDefinition{}
+	for _, a := range readAgent.Agents {
+		byID[a.Name] = a
+	}
+	root := byID["coder"]
+	assert.Equal(t, "Writes and edits code", root.Description)
+	assert.Equal(t, "claude-sonnet-4-6", root.Model)
+	assert.Equal(t, []string{"reviewer"}, root.Subagents)
+	sub := byID["reviewer"]
+	assert.Equal(t, "Review code", sub.Description)
+	assert.Equal(t, "You are a code reviewer.", sub.SystemPrompt)
 }
 
 func TestWriteAndReadAgentYAML(t *testing.T) {
@@ -131,33 +151,35 @@ func TestWriteAndReadAgentYAML(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	maxTurns := 20
-	agent := model.AgentDefinition{
-		Name:           "coder",
-		Model:          "claude-sonnet-4-6",
-		SystemPrompt:   "You are a coding assistant.",
-		MaxTurns:       &maxTurns,
-		PermissionMode: "auto",
-		Tools:          []string{"Read", "Write"},
-		Skills: []model.SkillSource{
-			{Name: "code-review", URL: "https://example.com/cr.zip", Hash: strings.Repeat("a", 64)},
-		},
-		SettingSources: []string{"user", "project"},
-		Subagents: []model.SubagentDefinition{
-			{
-				Name:        "reviewer",
-				Description: "Review code",
-				Prompt:      "You are a code reviewer.",
-				Tools:       []string{"Read"},
-				MaxTurns:    func() *int { v := 10; return &v }(),
+	subMaxTurns := 10
+	agents := []model.AgentDefinition{
+		{
+			Name:           "coder",
+			Model:          "claude-sonnet-4-6",
+			SystemPrompt:   "You are a coding assistant.",
+			MaxTurns:       &maxTurns,
+			PermissionMode: "auto",
+			Tools:          []string{"Read", "Write"},
+			Skills: []model.SkillSource{
+				{Name: "code-review", URL: "https://example.com/cr.zip", Hash: strings.Repeat("a", 64)},
+			},
+			SettingSources: []string{"user", "project"},
+			Subagents:      []string{"reviewer"},
+			Datasets: map[string]string{
+				"dataset-1": "Primary dataset for code review",
+				"dataset-2": "Secondary dataset for testing",
 			},
 		},
-		Datasets: map[string]string{
-			"dataset-1": "Primary dataset for code review",
-			"dataset-2": "Secondary dataset for testing",
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
+			Tools:        []string{"Read"},
+			MaxTurns:     &subMaxTurns,
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	// Verify file is created at the correct path.
@@ -166,23 +188,26 @@ func TestWriteAndReadAgentYAML(t *testing.T) {
 	require.NoError(t, err, "agents.yaml should be created at expected path")
 
 	// Read back and verify identity.
-	readAgent, err := store.ReadAgentYAML("coder")
+	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
-	assert.Equal(t, agent.Name, readAgent.Name)
-	assert.Equal(t, agent.Model, readAgent.Model)
-	assert.Equal(t, agent.SystemPrompt, readAgent.SystemPrompt)
-	assert.Equal(t, *agent.MaxTurns, *readAgent.MaxTurns)
-	assert.Equal(t, agent.PermissionMode, readAgent.PermissionMode)
-	assert.Equal(t, agent.Tools, readAgent.Tools)
+	require.Len(t, graph.Agents, 2)
+	readAgent := graph.Agents[0]
+	assert.Equal(t, agents[0].Name, readAgent.Name)
+	assert.Equal(t, agents[0].Model, readAgent.Model)
+	assert.Equal(t, agents[0].SystemPrompt, readAgent.SystemPrompt)
+	assert.Equal(t, *agents[0].MaxTurns, *readAgent.MaxTurns)
+	assert.Equal(t, agents[0].PermissionMode, readAgent.PermissionMode)
+	assert.Equal(t, agents[0].Tools, readAgent.Tools)
 	assert.Empty(t, readAgent.Skills, "Skills should not be persisted to or read from YAML")
-	require.Len(t, readAgent.Subagents, 1)
-	assert.Equal(t, agent.Subagents[0].Name, readAgent.Subagents[0].Name)
-	assert.Equal(t, agent.Subagents[0].Description, readAgent.Subagents[0].Description)
-	assert.Equal(t, agent.Subagents[0].Prompt, readAgent.Subagents[0].Prompt)
-	assert.Equal(t, agent.Subagents[0].Tools, readAgent.Subagents[0].Tools)
-	assert.Equal(t, *agent.Subagents[0].MaxTurns, *readAgent.Subagents[0].MaxTurns)
-	assert.Equal(t, agent.SettingSources, readAgent.SettingSources)
-	assert.Equal(t, agent.Datasets, readAgent.Datasets)
+	assert.Equal(t, []string{"reviewer"}, readAgent.Subagents)
+	readSub := graph.Agents[1]
+	assert.Equal(t, agents[1].Name, readSub.Name)
+	assert.Equal(t, agents[1].Description, readSub.Description)
+	assert.Equal(t, agents[1].SystemPrompt, readSub.SystemPrompt)
+	assert.Equal(t, agents[1].Tools, readSub.Tools)
+	assert.Equal(t, *agents[1].MaxTurns, *readSub.MaxTurns)
+	assert.Equal(t, agents[0].SettingSources, readAgent.SettingSources)
+	assert.Equal(t, agents[0].Datasets, readAgent.Datasets)
 }
 
 func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
@@ -190,32 +215,33 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	maxTurns := 20
-	agent := model.AgentDefinition{
-		Name:           "coder",
-		Model:          "claude-sonnet-4-6",
-		SystemPrompt:   "You are a coding assistant.",
-		MaxTurns:       &maxTurns,
-		PermissionMode: "auto",
-		Tools:          []string{"Read", "Write"},
-		Skills: []model.SkillSource{
-			{Name: "code-review", URL: "https://example.com/cr.zip", Hash: strings.Repeat("a", 64)},
-		},
-		SettingSources: []string{"user", "project"},
-		Subagents: []model.SubagentDefinition{
-			{
-				Name:        "reviewer",
-				Description: "Review code",
-				Prompt:      "You are a code reviewer.",
-				Tools:       []string{"Read"},
-				MaxTurns:    func() *int { v := 10; return &v }(),
+	agents := []model.AgentDefinition{
+		{
+			Name:           "coder",
+			Model:          "claude-sonnet-4-6",
+			SystemPrompt:   "You are a coding assistant.",
+			MaxTurns:       &maxTurns,
+			PermissionMode: "auto",
+			Tools:          []string{"Read", "Write"},
+			Skills: []model.SkillSource{
+				{Name: "code-review", URL: "https://example.com/cr.zip", Hash: strings.Repeat("a", 64)},
+			},
+			SettingSources: []string{"user", "project"},
+			Subagents:      []string{"reviewer"},
+			Datasets: map[string]string{
+				"dataset-1": "Primary dataset",
 			},
 		},
-		Datasets: map[string]string{
-			"dataset-1": "Primary dataset",
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
+			Tools:        []string{"Read"},
+			MaxTurns:     func() *int { v := 10; return &v }(),
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -225,11 +251,11 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 	err = yaml.Unmarshal(data, &doc)
 	require.NoError(t, err)
 
-	agents, ok := doc["agents"].([]interface{})
+	entries, ok := doc["agents"].([]interface{})
 	require.True(t, ok, "top-level agents key should be a list")
-	require.Len(t, agents, 2, "main agent + subagent as first-class entries")
+	require.Len(t, entries, 2, "main agent + subagent as first-class entries")
 
-	entry, ok := agents[0].(map[string]interface{})
+	entry, ok := entries[0].(map[string]interface{})
 	require.True(t, ok)
 
 	assert.Equal(t, "coder", entry["id"])
@@ -249,7 +275,7 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 	assert.Equal(t, []interface{}{"reviewer"}, entry["subagents"],
 		"subagents should be an id reference list")
 
-	reviewer, ok := agents[1].(map[string]interface{})
+	reviewer, ok := entries[1].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "reviewer", reviewer["id"])
 	assert.Equal(t, "Review code", reviewer["description"])
@@ -269,7 +295,7 @@ func TestWriteAgentYAML_NilMaxTurnsOmitted(t *testing.T) {
 		MaxTurns:     nil,
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -294,28 +320,13 @@ func TestReadAgentYAML_NonExistent(t *testing.T) {
 		"expected a file-not-found error, got: %v", err)
 }
 
-func TestWriteAgentYAML_NameMismatch(t *testing.T) {
-	tmpDir := t.TempDir()
-	store := NewAgentStorage(tmpDir)
-
-	agent := model.AgentDefinition{
-		Name: "coder",
-	}
-	err := store.WriteAgentYAML("different-name", agent, model.ProviderConfig{}, nil, nil, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not match storage name")
-}
-
 func TestWriteAgentYAML_EmptyName(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
-	agent := model.AgentDefinition{
-		Name: "",
-	}
-	err := store.WriteAgentYAML("", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("", nil, model.ProviderConfig{}, nil, nil, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "agent.Name is required")
+	assert.Contains(t, err.Error(), "must be a single path segment")
 }
 
 func TestWriteAgentYAML_PathTraversalRejected(t *testing.T) {
@@ -325,7 +336,7 @@ func TestWriteAgentYAML_PathTraversalRejected(t *testing.T) {
 	cases := []string{"../etc", "a/b", "/abs", ".", ".."}
 	for _, bad := range cases {
 		agent := model.AgentDefinition{Name: bad, Model: "m", SystemPrompt: "p"}
-		err := store.WriteAgentYAML(bad, agent, model.ProviderConfig{}, nil, nil, nil)
+		err := store.WriteAgentYAML(bad, []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 		require.Error(t, err, "name %q should be rejected", bad)
 		assert.Contains(t, err.Error(), "must be a single path segment")
 	}
@@ -349,27 +360,24 @@ func TestReadAgentYAML_SubagentsPreserveDefinitionOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
-	agent := model.AgentDefinition{
-		Name: "orchestrator",
-		Subagents: []model.SubagentDefinition{
-			{Name: "zeta", Description: "z desc"},
-			{Name: "alpha", Description: "a desc"},
-			{Name: "mid", Description: "m desc"},
+	agents := []model.AgentDefinition{
+		{
+			Name:      "orchestrator",
+			Subagents: []string{"zeta", "alpha", "mid"},
 		},
+		{Name: "zeta", Description: "z desc"},
+		{Name: "alpha", Description: "a desc"},
+		{Name: "mid", Description: "m desc"},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("orchestrator", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("orchestrator", agents, model.ProviderConfig{}, nil, nil, nil))
 
-	readAgent, err := store.ReadAgentYAML("orchestrator")
+	graph, err := store.ReadAgentYAML("orchestrator")
 	require.NoError(t, err)
-	require.Len(t, readAgent.Subagents, 3)
+	require.Len(t, graph.Agents, 4)
 
-	expected := []string{"zeta", "alpha", "mid"}
-	actual := make([]string, len(readAgent.Subagents))
-	for i, s := range readAgent.Subagents {
-		actual[i] = s.Name
-	}
-	assert.Equal(t, expected, actual, "subagents should preserve the definition order of the id reference list")
+	assert.Equal(t, []string{"zeta", "alpha", "mid"}, graph.Agents[0].Subagents,
+		"subagents should preserve the definition order of the id reference list")
 }
 
 func TestEnsureDirs_CreatesMultipleDirs(t *testing.T) {
@@ -422,36 +430,38 @@ func TestWriteAndReadAgentYAML_WithMcpServers(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	maxTurns := 20
-	agent := model.AgentDefinition{
-		Name:           "coder",
-		Model:          "claude-sonnet-4-6",
-		SystemPrompt:   "You are a coding assistant.",
-		MaxTurns:       &maxTurns,
-		PermissionMode: "auto",
-		Tools:          []string{"Read", "Write"},
-		McpServers: map[string]model.McpServerConfig{
-			"remote-api": {
-				Type:    "sse",
-				URL:     "https://api.example.com/sse",
-				Headers: map[string]string{"Authorization": "Bearer xxx"},
+	agents := []model.AgentDefinition{
+		{
+			Name:           "coder",
+			Model:          "claude-sonnet-4-6",
+			SystemPrompt:   "You are a coding assistant.",
+			MaxTurns:       &maxTurns,
+			PermissionMode: "auto",
+			Tools:          []string{"Read", "Write"},
+			McpServers: map[string]model.McpServerConfig{
+				"remote-api": {
+					Type:    "sse",
+					URL:     "https://api.example.com/sse",
+					Headers: map[string]string{"Authorization": "Bearer xxx"},
+				},
 			},
+			Subagents: []string{"reviewer"},
 		},
-		Subagents: []model.SubagentDefinition{
-			{
-				Name:        "reviewer",
-				Description: "Review code",
-				Prompt:      "You are a code reviewer.",
-				Tools:       []string{"Read"},
-			},
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
+			Tools:        []string{"Read"},
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
-	readAgent, err := store.ReadAgentYAML("coder")
+	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
 
+	readAgent := graph.Agents[0]
 	require.Len(t, readAgent.McpServers, 1)
 	mcp, ok := readAgent.McpServers["remote-api"]
 	require.True(t, ok)
@@ -459,8 +469,7 @@ func TestWriteAndReadAgentYAML_WithMcpServers(t *testing.T) {
 	assert.Equal(t, "https://api.example.com/sse", mcp.URL)
 	assert.Equal(t, "Bearer xxx", mcp.Headers["Authorization"])
 
-	require.Len(t, readAgent.Subagents, 1)
-	assert.Equal(t, "reviewer", readAgent.Subagents[0].Name)
+	assert.Equal(t, []string{"reviewer"}, readAgent.Subagents)
 }
 
 func TestWriteAgentYAML_McpServersUsesTransportField(t *testing.T) {
@@ -480,7 +489,7 @@ func TestWriteAgentYAML_McpServersUsesTransportField(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -510,7 +519,7 @@ func TestWriteAndReadAgentYAML_McpServersEmptyOmitted(t *testing.T) {
 		SystemPrompt: "You are a coding assistant.",
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -525,9 +534,10 @@ func TestWriteAndReadAgentYAML_McpServersEmptyOmitted(t *testing.T) {
 	_, present := entry["mcpServers"]
 	assert.False(t, present, "mcpServers should be omitted when empty")
 
-	readAgent, err := store.ReadAgentYAML("coder")
+	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
-	assert.Empty(t, readAgent.McpServers)
+	require.Len(t, graph.Agents, 1)
+	assert.Empty(t, graph.Agents[0].McpServers)
 }
 
 func TestWriteAgentYAML_SettingSourcesDefaultsToProject(t *testing.T) {
@@ -541,7 +551,7 @@ func TestWriteAgentYAML_SettingSourcesDefaultsToProject(t *testing.T) {
 		SettingSources: nil, // explicitly nil
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -565,7 +575,7 @@ func TestWriteAgentYAML_SettingSourcesEmptySliceDefaultsToProject(t *testing.T) 
 		SettingSources: []string{}, // explicitly empty
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -589,7 +599,7 @@ func TestWriteAgentYAML_SettingSourcesPassthrough(t *testing.T) {
 		SettingSources: []string{"user", "project"},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -612,7 +622,7 @@ func TestWriteAgentYAML_DatasetsOmittedWhenEmpty(t *testing.T) {
 		Datasets:     map[string]string{},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -631,21 +641,22 @@ func TestWriteAgentYAML_ContainsMaxSessionTurns(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	maxSessionTurns := 50
-	agent := model.AgentDefinition{
-		Name:            "coder",
-		Model:           "claude-sonnet-4-6",
-		SystemPrompt:    "You are a coding assistant.",
-		MaxSessionTurns: &maxSessionTurns,
-		Subagents: []model.SubagentDefinition{
-			{
-				Name:        "reviewer",
-				Description: "Review code",
-				Prompt:      "You are a code reviewer.",
-			},
+	agents := []model.AgentDefinition{
+		{
+			Name:            "coder",
+			Model:           "claude-sonnet-4-6",
+			SystemPrompt:    "You are a coding assistant.",
+			MaxSessionTurns: &maxSessionTurns,
+			Subagents:       []string{"reviewer"},
+		},
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -655,14 +666,14 @@ func TestWriteAgentYAML_ContainsMaxSessionTurns(t *testing.T) {
 	err = yaml.Unmarshal(data, &doc)
 	require.NoError(t, err)
 
-	agents := doc["agents"].([]interface{})
-	require.Len(t, agents, 2)
-	entry := agents[0].(map[string]interface{})
+	entries := doc["agents"].([]interface{})
+	require.Len(t, entries, 2)
+	entry := entries[0].(map[string]interface{})
 	assert.Equal(t, 50, entry["maxSessionTurns"])
 	assert.Equal(t, []interface{}{"reviewer"}, entry["subagents"])
 
 	// Subagent should NOT carry maxSessionTurns (agent-runtime issue #1: won't fix).
-	reviewer := agents[1].(map[string]interface{})
+	reviewer := entries[1].(map[string]interface{})
 	_, present := reviewer["maxSessionTurns"]
 	assert.False(t, present, "subagent maxSessionTurns should not be serialized")
 }
@@ -678,7 +689,7 @@ func TestWriteAgentYAML_NilMaxSessionTurnsOmitted(t *testing.T) {
 		MaxSessionTurns: nil,
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -699,30 +710,32 @@ func TestReadAgentYAML_MaxSessionTurns(t *testing.T) {
 	store := NewAgentStorage(tmpDir)
 
 	maxSessionTurns := 50
-	agent := model.AgentDefinition{
-		Name:            "coder",
-		Model:           "claude-sonnet-4-6",
-		SystemPrompt:    "You are a coding assistant.",
-		MaxSessionTurns: &maxSessionTurns,
-		Subagents: []model.SubagentDefinition{
-			{
-				Name:        "reviewer",
-				Description: "Review code",
-				Prompt:      "You are a code reviewer.",
-			},
+	agents := []model.AgentDefinition{
+		{
+			Name:            "coder",
+			Model:           "claude-sonnet-4-6",
+			SystemPrompt:    "You are a coding assistant.",
+			MaxSessionTurns: &maxSessionTurns,
+			Subagents:       []string{"reviewer"},
+		},
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
-	readAgent, err := store.ReadAgentYAML("coder")
+	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
 
+	readAgent := graph.Agents[0]
 	require.NotNil(t, readAgent.MaxSessionTurns)
 	assert.Equal(t, 50, *readAgent.MaxSessionTurns)
 
-	require.Len(t, readAgent.Subagents, 1)
+	assert.Equal(t, []string{"reviewer"}, readAgent.Subagents)
 }
 
 func TestWriteAgentYAML_WithAigc(t *testing.T) {
@@ -744,7 +757,7 @@ func TestWriteAgentYAML_WithAigc(t *testing.T) {
 		// ExplicitHint 未传：应物化为 true
 	}
 
-	err := store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, nil, nil)
+	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -780,7 +793,7 @@ func TestWriteAgentYAML_AigcExplicitHintFalsePreserved(t *testing.T) {
 		ExplicitHint:    &explicitFalse,
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -806,7 +819,7 @@ func TestWriteAgentYAML_NoAigcSectionWhenNilOrDisabled(t *testing.T) {
 				Model:        "glm-4.5",
 				SystemPrompt: "You are a coding assistant.",
 			}
-			require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, nil, nil))
+			require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil))
 
 			data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 			require.NoError(t, err)
@@ -819,14 +832,15 @@ func TestWriteAgentYAML_ProviderCredentialsOnMainEntryOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
-	agent := model.AgentDefinition{
-		Name:         "coder",
-		Description:  "Writes and edits code",
-		Model:        "claude-sonnet-4-6",
-		SystemPrompt: "You are a coding assistant.",
-		Subagents: []model.SubagentDefinition{
-			{Name: "reviewer", Description: "Review code", Prompt: "You are a code reviewer."},
+	agents := []model.AgentDefinition{
+		{
+			Name:         "coder",
+			Description:  "Writes and edits code",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+			Subagents:    []string{"reviewer"},
 		},
+		{Name: "reviewer", Description: "Review code", SystemPrompt: "You are a code reviewer."},
 	}
 	provider := model.ProviderConfig{
 		Protocol: "anthropic-messages",
@@ -834,22 +848,22 @@ func TestWriteAgentYAML_ProviderCredentialsOnMainEntryOnly(t *testing.T) {
 		APIKey:   "sk-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", agents, provider, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
 
 	var doc map[string]interface{}
 	require.NoError(t, yaml.Unmarshal(data, &doc))
-	agents := doc["agents"].([]interface{})
-	require.Len(t, agents, 2)
+	entries := doc["agents"].([]interface{})
+	require.Len(t, entries, 2)
 
-	main := agents[0].(map[string]interface{})
+	main := entries[0].(map[string]interface{})
 	assert.Equal(t, "sk-secret", main["apiKey"])
 	assert.Equal(t, "https://api.anthropic.com", main["baseURL"])
 	assert.Equal(t, "anthropic-messages", main["apiType"])
 
-	sub := agents[1].(map[string]interface{})
+	sub := entries[1].(map[string]interface{})
 	for _, f := range []string{"apiKey", "baseURL", "apiType"} {
 		_, present := sub[f]
 		assert.False(t, present, "subagent entry should not carry %s", f)
@@ -872,7 +886,7 @@ func TestWriteAgentYAML_CredentialFieldOrder(t *testing.T) {
 		APIKey:   "sk-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, provider, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -908,7 +922,7 @@ func TestWriteAgentYAML_WithHub(t *testing.T) {
 		Org:         "tenant-a",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -938,7 +952,7 @@ func TestWriteAgentYAML_HubOrgOmittedWhenEmpty(t *testing.T) {
 		ChatPushKey: "push-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -960,7 +974,7 @@ func TestWriteAgentYAML_NoHubSectionWhenNilOrDisabled(t *testing.T) {
 				Model:        "glm-4.5",
 				SystemPrompt: "You are a coding assistant.",
 			}
-			require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, nil, hub, nil))
+			require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
 
 			data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 			require.NoError(t, err)
@@ -989,7 +1003,7 @@ func TestWriteAgentYAML_HubAndAigcCoexist(t *testing.T) {
 		ChatPushKey: "push-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agent, model.ProviderConfig{}, aigc, hub, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, hub, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -1010,8 +1024,8 @@ func TestWriteAgentYAML_CustomTools(t *testing.T) {
 	}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-x"}
 
-	err := s.WriteAgentYAML("coder", agent, provider, nil, nil, []string{
-		"./tools/Zebra.mjs", "./tools/Alpha.ts",
+	err := s.WriteAgentYAML("coder", []model.AgentDefinition{agent}, provider, nil, nil, map[string][]string{
+		"coder": {"./tools/Zebra.mjs", "./tools/Alpha.ts"},
 	})
 	require.NoError(t, err)
 
@@ -1040,7 +1054,7 @@ func TestWriteAgentYAML_CustomTools_OmittedWhenEmpty(t *testing.T) {
 	agent := model.AgentDefinition{Name: "coder", Description: "d", Model: "m", SystemPrompt: "s"}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-x"}
 
-	require.NoError(t, s.WriteAgentYAML("coder", agent, provider, nil, nil, nil))
+	require.NoError(t, s.WriteAgentYAML("coder", []model.AgentDefinition{agent}, provider, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(dir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -1048,18 +1062,162 @@ func TestWriteAgentYAML_CustomTools_OmittedWhenEmpty(t *testing.T) {
 }
 
 func TestWriteAgentYAML_CustomTools_DoesNotTouchSubagentEntries(t *testing.T) {
-	// customTools are main-entry-only: subagent entries must not inherit them.
+	// toolPaths is keyed by agent id: paths registered for the root entry only
+	// must not leak into other entries.
 	dir := t.TempDir()
 	s := NewAgentStorage(dir)
-	agent := model.AgentDefinition{
-		Name: "coder", Description: "d", Model: "m", SystemPrompt: "s",
-		Subagents: []model.SubagentDefinition{{Name: "helper", Description: "h", Prompt: "p"}},
+	agents := []model.AgentDefinition{
+		{Name: "coder", Description: "d", Model: "m", SystemPrompt: "s", Subagents: []string{"helper"}},
+		{Name: "helper", Description: "h", SystemPrompt: "p"},
 	}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-x"}
 
-	require.NoError(t, s.WriteAgentYAML("coder", agent, provider, nil, nil, []string{"./tools/A.mjs"}))
+	require.NoError(t, s.WriteAgentYAML("coder", agents, provider, nil, nil, map[string][]string{"coder": {"./tools/A.mjs"}}))
 
 	data, err := os.ReadFile(filepath.Join(dir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(data), "customTools"), "exactly one customTools key (main entry only)")
+}
+
+func TestWriteAgentYAML_CompleteGraph(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	agents := []model.AgentDefinition{
+		{
+			Name:         "parent",
+			Description:  "Coordinates work",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "Delegate tasks",
+			Tools:        []string{"Task"},
+			Subagents:    []string{"child-a", "child-b"},
+		},
+		{
+			Name:            "child-a",
+			Description:     "Research specialist",
+			SystemPrompt:    "Research and summarize",
+			Tools:           []string{"WebSearch"},
+			DisallowedTools: []string{"Bash"},
+			McpServers: map[string]model.McpServerConfig{
+				"knowledge": {Type: "http", URL: "https://example.invalid/mcp"},
+			},
+			SettingSources: []string{"user"},
+			Skills:         []model.SkillSource{{Name: "skill-a", URL: "https://example.com/s.zip", Hash: strings.Repeat("b", 64)}},
+			Datasets:       map[string]string{"knowledge-a": "Child A knowledge"},
+		},
+		{
+			Name:         "child-b",
+			Description:  "Review specialist",
+			SystemPrompt: "Review the result",
+		},
+	}
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-root"}
+	toolPaths := map[string][]string{"child-a": {"./tools/child-a-tool.mjs"}}
+
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, toolPaths))
+
+	data, err := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	yamlStr := string(data)
+
+	var doc struct {
+		Agents []map[string]any `yaml:"agents"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	require.Len(t, doc.Agents, 3)
+
+	byID := map[string]map[string]any{}
+	for _, e := range doc.Agents {
+		byID[e["id"].(string)] = e
+	}
+
+	// Root: provider credentials + model; subagents are pure id refs.
+	root := byID["parent"]
+	assert.Equal(t, "sk-root", root["apiKey"])
+	assert.Equal(t, "anthropic-messages", root["apiType"])
+	assert.Equal(t, "claude-sonnet-4-6", root["model"])
+	assert.Equal(t, []any{"child-a", "child-b"}, root["subagents"])
+
+	// child-a: full Agent-local profile; NO provider credentials, NO model.
+	childA := byID["child-a"]
+	assert.Equal(t, "Research specialist", childA["description"])
+	assert.Equal(t, []any{"Bash"}, childA["disallowedTools"])
+	assert.Equal(t, []any{"./tools/child-a-tool.mjs"}, childA["customTools"])
+	assert.Equal(t, []any{"user"}, childA["settingSources"])
+	assert.Equal(t, []any{"/app/config/skills/child-a"}, childA["extraUserSkillDirs"])
+	assert.Contains(t, childA, "mcpServers")
+	assert.Equal(t, map[string]any{"knowledge-a": "Child A knowledge"}, childA["datasets"])
+	assert.NotContains(t, childA, "apiKey")
+	assert.NotContains(t, childA, "model")
+	_, hasSub := childA["subagents"]
+	assert.False(t, hasSub, "child with no subagents must omit the key")
+
+	// child-b: empty capabilities stay empty (no inheritance from parent).
+	childB := byID["child-b"]
+	assert.NotContains(t, childB, "mcpServers")
+	assert.NotContains(t, childB, "customTools")
+	assert.NotContains(t, childB, "datasets")
+	assert.NotContains(t, childB, "disallowedTools")
+	assert.NotContains(t, childB, "allowedTools")
+
+	assert.NotContains(t, yamlStr, "sk-child", "no child credentials anywhere")
+}
+
+func TestReadAgentYAML_CompleteGraphRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+
+	agents := []model.AgentDefinition{
+		{
+			Name:         "parent",
+			Description:  "Coordinates work",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "Delegate tasks",
+			Tools:        []string{"Task"},
+			Subagents:    []string{"child-a"},
+		},
+		{
+			Name:            "child-a",
+			Description:     "Research specialist",
+			SystemPrompt:    "Research and summarize",
+			DisallowedTools: []string{"Bash"},
+			SettingSources:  []string{"user"},
+			Skills:          []model.SkillSource{{Name: "skill-a", URL: "https://example.com/s.zip", Hash: strings.Repeat("b", 64)}},
+			Datasets:        map[string]string{"knowledge-a": "Child A knowledge"},
+		},
+	}
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-root"}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+
+	graph, err := store.ReadAgentYAML("parent")
+	require.NoError(t, err)
+	assert.Equal(t, "parent", graph.RootAgentID)
+	require.Len(t, graph.Agents, 2)
+
+	var root, child *model.AgentDefinition
+	for i := range graph.Agents {
+		switch graph.Agents[i].Name {
+		case "parent":
+			root = &graph.Agents[i]
+		case "child-a":
+			child = &graph.Agents[i]
+		}
+	}
+	require.NotNil(t, root)
+	require.NotNil(t, child)
+	assert.Equal(t, []string{"child-a"}, root.Subagents)
+	assert.Equal(t, "claude-sonnet-4-6", root.Model)
+	// disallowedTools round-trips losslessly (issue #16 regression #4).
+	assert.Equal(t, []string{"Bash"}, child.DisallowedTools)
+	assert.Equal(t, map[string]string{"knowledge-a": "Child A knowledge"}, child.Datasets)
+	assert.Empty(t, child.Subagents)
+}
+
+func TestWriteAgentYAML_RejectsNameMismatch(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	agents := []model.AgentDefinition{{Name: "other", Description: "x", Model: "m"}}
+	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no agent with id")
 }

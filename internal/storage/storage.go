@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/zerone-agent/agent-deployer/internal/model"
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,13 +51,16 @@ type runtimeAgentEntry struct {
 	MaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
 	PermissionMode  string   `yaml:"permissionMode,omitempty"`
 	AllowedTools    []string `yaml:"allowedTools,omitempty"`
-	// CustomTools lists verified tool file paths relative to the configDir
-	// (issue #10). Main entry only; the runtime resolves them itself.
-	CustomTools    []string                         `yaml:"customTools,omitempty"`
-	SettingSources []string                         `yaml:"settingSources,omitempty"`
-	Subagents      []string                         `yaml:"subagents,omitempty"`
-	McpServers     map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
-	Datasets       map[string]string                `yaml:"datasets,omitempty"`
+	DisallowedTools []string `yaml:"disallowedTools,omitempty"`
+	// CustomTools lists verified tool file paths relative to the configDir (issue
+	// #10); each entry carries only the paths its own agent declared. The
+	// runtime resolves them itself.
+	CustomTools        []string                         `yaml:"customTools,omitempty"`
+	SettingSources     []string                         `yaml:"settingSources,omitempty"`
+	ExtraUserSkillDirs []string                         `yaml:"extraUserSkillDirs,omitempty"`
+	Subagents          []string                         `yaml:"subagents,omitempty"`
+	McpServers         map[string]model.McpServerConfig `yaml:"mcpServers,omitempty"`
+	Datasets           map[string]string                `yaml:"datasets,omitempty"`
 }
 
 // runtimeAigcSection is the shape of the top-level "aigc" section in the
@@ -90,74 +94,78 @@ type runtimeAgentsYAML struct {
 	Agents []runtimeAgentEntry `yaml:"agents"`
 }
 
-// WriteAgentYAML writes the agent definition to <agentsDir>/<name>/agents.yaml
-// in the runtime agents.yaml format. customToolPaths are written verbatim
-// (sorted, "./"-relative to the configDir) under the main entry's customTools;
-// nil/empty omits the key.
-func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, customToolPaths []string) error {
-	if strings.TrimSpace(agent.Name) == "" {
-		return fmt.Errorf("agent.Name is required")
-	}
-	if agent.Name != name {
-		return fmt.Errorf("agent.Name %q does not match storage name %q", agent.Name, name)
-	}
+// WriteAgentYAML writes the complete agent graph to
+// <dataDir>/<rootName>/agents/agents.yaml in the runtime v2.4.0+ format: every
+// agent is a first-class entry and subagents are pure id references. Provider
+// credentials and model (runtime-global) are written to the root entry only.
+// toolPaths maps agent id -> verified "./tools/..." paths for that agent.
+// Agents that declare skills get their per-agent skill dir injected as an
+// extraUserSkillDirs entry (user-level scan; see the service install layout).
+func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, toolPaths map[string][]string) error {
 	// Defense-in-depth: reject path traversal in the name parameter so a
-	// caller cannot escape agentsDir via "../" or absolute paths.
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
-		return fmt.Errorf("invalid agent name %q: must be a single path segment", name)
+	// caller cannot escape dataDir via "../" or absolute paths.
+	if rootName == "" || rootName == "." || rootName == ".." || strings.ContainsAny(rootName, `/\`) {
+		return fmt.Errorf("invalid agent name %q: must be a single path segment", rootName)
 	}
 
-	settingSources := agent.SettingSources
-	if len(settingSources) == 0 {
-		settingSources = []string{"project"}
+	byID := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		byID[a.Name] = true
+	}
+	if !byID[rootName] {
+		return fmt.Errorf("no agent with id %q in graph", rootName)
 	}
 
-	entry := runtimeAgentEntry{
-		ID:              name,
-		Name:            name,
-		Description:     agent.Description,
-		Model:           agent.Model,
-		SystemPrompt:    agent.SystemPrompt,
-		MaxTurns:        agent.MaxTurns,
-		MaxSessionTurns: agent.MaxSessionTurns,
-		PermissionMode:  agent.PermissionMode,
-		AllowedTools:    agent.Tools,
-		SettingSources:  settingSources,
-		McpServers:      agent.McpServers,
-		Datasets:        agent.Datasets,
-		APIKey:          provider.APIKey,
-		BaseURL:         provider.BaseURL,
-		APIType:         provider.Protocol,
-	}
-
-	if len(customToolPaths) > 0 {
-		sorted := make([]string, len(customToolPaths))
-		copy(sorted, customToolPaths)
-		sort.Strings(sorted)
-		entry.CustomTools = sorted
-	}
-
-	entries := []runtimeAgentEntry{entry}
-
-	// Runtime 2.0 mount-by-reference: each subagent becomes a first-class
-	// top-level entry, and the main entry references it by id. Subagent
-	// entries carry only the 5 fields the runtime maps when mounting
-	// (description, systemPrompt, allowedTools, disallowedTools, maxTurns) —
-	// model, mcpServers and per-agent credentials are intentionally omitted
-	// because they do not apply in the mounted context.
-	if len(agent.Subagents) > 0 {
-		entries[0].Subagents = make([]string, 0, len(agent.Subagents))
-		for _, sub := range agent.Subagents {
-			entries[0].Subagents = append(entries[0].Subagents, sub.Name)
-			entries = append(entries, runtimeAgentEntry{
-				ID:           sub.Name,
-				Name:         sub.Name,
-				Description:  sub.Description,
-				SystemPrompt: sub.Prompt,
-				AllowedTools: sub.Tools,
-				MaxTurns:     sub.MaxTurns,
-			})
+	entries := make([]runtimeAgentEntry, 0, len(agents))
+	for _, a := range agents {
+		entry := runtimeAgentEntry{
+			ID:                 a.Name,
+			Name:               a.Name,
+			Description:        a.Description,
+			SystemPrompt:       a.SystemPrompt,
+			MaxTurns:           a.MaxTurns,
+			AllowedTools:       a.Tools,
+			DisallowedTools:    a.DisallowedTools,
+			SettingSources:     a.SettingSources,
+			ExtraUserSkillDirs: append([]string(nil), a.ExtraUserSkillDirs...),
+			Subagents:          a.Subagents,
+			McpServers:         a.McpServers,
+			Datasets:           a.Datasets,
 		}
+
+		if a.Name == rootName {
+			// Runtime-global execution environment (issue #16): credentials and
+			// model on the root entry only; mounted agents reuse the root
+			// process environment and never receive their own copy.
+			entry.Model = a.Model
+			entry.MaxSessionTurns = a.MaxSessionTurns
+			entry.PermissionMode = a.PermissionMode
+			entry.APIKey = provider.APIKey
+			entry.BaseURL = provider.BaseURL
+			entry.APIType = provider.Protocol
+			if len(entry.SettingSources) == 0 {
+				entry.SettingSources = []string{"project"}
+			}
+		}
+
+		if paths := toolPaths[a.Name]; len(paths) > 0 {
+			sorted := make([]string, len(paths))
+			copy(sorted, paths)
+			sort.Strings(sorted)
+			entry.CustomTools = sorted
+		}
+
+		// Per-agent skill visibility: skills install under
+		// <agentsDir>/skills/<id>/ and are scanned at user level. model
+		// validation already guarantees settingSources contains "user".
+		if len(a.Skills) > 0 {
+			skillDir := naming.ContainerSkillDir(a.Name)
+			if !containsString(entry.ExtraUserSkillDirs, skillDir) {
+				entry.ExtraUserSkillDirs = append(entry.ExtraUserSkillDirs, skillDir)
+			}
+		}
+
+		entries = append(entries, entry)
 	}
 
 	doc := runtimeAgentsYAML{Agents: entries}
@@ -193,7 +201,7 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 		return fmt.Errorf("marshal agent YAML: %w", err)
 	}
 
-	agentDir := filepath.Join(s.dataDir, name, "agents")
+	agentDir := filepath.Join(s.dataDir, rootName, "agents")
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return fmt.Errorf("create agent directory: %w", err)
 	}
@@ -206,8 +214,18 @@ func (s *AgentStorage) WriteAgentYAML(name string, agent model.AgentDefinition, 
 	return nil
 }
 
-// ReadAgentYAML reads the agent definition from <agentsDir>/<name>/agents.yaml.
-func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error) {
+// AgentGraph is the complete agent graph read back from agents.yaml.
+type AgentGraph struct {
+	RootAgentID string
+	Agents      []model.AgentDefinition
+}
+
+// ReadAgentYAML reads the complete agent graph from
+// <dataDir>/<name>/agents/agents.yaml. The root entry is the one whose id
+// matches the storage name. Artifact URL metadata (SkillSource/ToolSource url
+// and hash) is not persisted in the YAML and is therefore empty on read-back —
+// only on-disk layout paths survive.
+func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 	filePath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -223,55 +241,46 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*model.AgentDefinition, error
 		return nil, ErrNoAgents
 	}
 
-	// The main entry is the one whose id matches the storage name; subagent
-	// entries share the same file as first-class agents.
-	byID := make(map[string]runtimeAgentEntry, len(doc.Agents))
+	graph := &AgentGraph{RootAgentID: name}
+	foundRoot := false
 	for _, e := range doc.Agents {
-		byID[e.ID] = e
-	}
-	entry, ok := byID[name]
-	if !ok {
-		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
-	}
-
-	// `name` is optional in the runtime schema (falls back to id); mirror that.
-	entryName := entry.Name
-	if entryName == "" {
-		entryName = entry.ID
-	}
-
-	agent := model.AgentDefinition{
-		Name:            entryName,
-		Description:     entry.Description,
-		Model:           entry.Model,
-		SystemPrompt:    entry.SystemPrompt,
-		MaxTurns:        entry.MaxTurns,
-		MaxSessionTurns: entry.MaxSessionTurns,
-		PermissionMode:  entry.PermissionMode,
-		Tools:           entry.AllowedTools,
-		SettingSources:  entry.SettingSources,
-		McpServers:      entry.McpServers,
-		Datasets:        entry.Datasets,
-	}
-
-	// Resolve subagent id references back to their definitions. Unknown
-	// references are skipped: the runtime rejects such configs at startup, so
-	// a readable file here implies they resolve; defensively ignore anyway.
-	for _, subID := range entry.Subagents {
-		sub, ok := byID[subID]
-		if !ok {
-			continue
+		entryName := e.Name
+		if entryName == "" {
+			entryName = e.ID
 		}
-		agent.Subagents = append(agent.Subagents, model.SubagentDefinition{
-			Name:        subID,
-			Description: sub.Description,
-			Prompt:      sub.SystemPrompt,
-			Tools:       sub.AllowedTools,
-			MaxTurns:    sub.MaxTurns,
+		if e.ID == name {
+			foundRoot = true
+		}
+		graph.Agents = append(graph.Agents, model.AgentDefinition{
+			Name:               entryName,
+			Description:        e.Description,
+			Model:              e.Model,
+			SystemPrompt:       e.SystemPrompt,
+			MaxTurns:           e.MaxTurns,
+			MaxSessionTurns:    e.MaxSessionTurns,
+			PermissionMode:     e.PermissionMode,
+			Tools:              e.AllowedTools,
+			DisallowedTools:    e.DisallowedTools,
+			SettingSources:     e.SettingSources,
+			ExtraUserSkillDirs: e.ExtraUserSkillDirs,
+			McpServers:         e.McpServers,
+			Datasets:           e.Datasets,
+			Subagents:          e.Subagents,
 		})
 	}
+	if !foundRoot {
+		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
+	}
+	return graph, nil
+}
 
-	return &agent, nil
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureDirs creates all the given directories with mode 0755 if they don't exist.
