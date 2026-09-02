@@ -277,7 +277,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 }
 
 // computeSystemPromptRefs maps each agent with a systemPrompt to its
-// external file reference (./prompts/<id>-<sha8>.md). The content-hashed
+// external file reference (./prompts/<id>-<sha256>.md). The content-hashed
 // file name keeps consecutive deployments of the same agent from
 // overwriting a prompt a previous YAML document still references.
 // promptFileName is the single prompt-reference/filename rule: the extension
@@ -323,23 +323,31 @@ func writeSystemPromptFiles(agentDir string, agents []model.AgentDefinition) err
 		if existing, err := os.ReadFile(final); err == nil && string(existing) == a.SystemPrompt {
 			continue // content-addressed file already matches; never rewrite it
 		}
-		tmp := final + ".tmp"
-		f, err := os.Create(tmp)
+		// os.CreateTemp uses a random sibling name with O_EXCL semantics:
+		// unlike a fixed "<final>.tmp" + os.Create (O_TRUNC), it never
+		// follows a pre-planted symlink out of the prompts directory, and
+		// concurrent writers cannot collide on one staging path.
+		tmp, err := os.CreateTemp(promptsDir, name+".tmp-*")
 		if err != nil {
+			return fmt.Errorf("create system prompt staging for agent %q: %w", a.Name, err)
+		}
+		tmpName := tmp.Name()
+		if _, err := tmp.WriteString(a.SystemPrompt); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
 			return fmt.Errorf("write system prompt for agent %q: %w", a.Name, err)
 		}
-		if _, err := f.WriteString(a.SystemPrompt); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("write system prompt for agent %q: %w", a.Name, err)
-		}
-		if err := f.Sync(); err != nil {
-			_ = f.Close()
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
 			return fmt.Errorf("sync system prompt for agent %q: %w", a.Name, err)
 		}
-		if err := f.Close(); err != nil {
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmpName)
 			return fmt.Errorf("close system prompt for agent %q: %w", a.Name, err)
 		}
-		if err := os.Rename(tmp, final); err != nil {
+		if err := os.Rename(tmpName, final); err != nil {
+			_ = os.Remove(tmpName)
 			return fmt.Errorf("replace system prompt for agent %q: %w", a.Name, err)
 		}
 	}

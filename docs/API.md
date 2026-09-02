@@ -450,7 +450,7 @@ One full Agent-local definition inside the deployment graph. Every entry — roo
 | `name` | string | Yes | Matches `[A-Za-z0-9._-]{1,64}`; unique across the graph | Agent id. The root's name must equal `rootAgentId` in sanitized form |
 | `description` | string | Yes | Non-empty | Description of the agent's capabilities; what the parent agent's Task tool displays when mounting this agent |
 | `model` | string | Root only | Required on the root; forbidden on non-root agents | Runtime-global model name, e.g. `claude-sonnet-4-6`. Mounted agents reuse the root runtime's execution environment |
-| `systemPrompt` | string | Root: yes | Non-empty on the root; optional for mounted agents | System prompt. The deployer externalizes it for readability: staged as `prompts/<id>-<sha8>.md` next to `agents.yaml` (bind-mounted into the container) and referenced via the entry's `systemPromptFile` (runtime v2.5.0 mutual-exclusion refine, relative to the config dir). Read-back restores the text, so the API shape never changes |
+| `systemPrompt` | string | Root: yes | Non-empty on the root; optional for mounted agents | System prompt. The deployer externalizes it for readability: staged as `prompts/<id>-<sha256>.md` next to `agents.yaml` (bind-mounted into the container) and referenced via the entry's `systemPromptFile` (runtime v2.5.0 mutual-exclusion refine, relative to the config dir). Read-back restores the text, so the API shape never changes |
 | `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for this agent (agent-local) |
 | `maxSessionTurns` | int \| null | Root only | — | Runtime-global session-level turn limit |
 | `permissionMode` | string | Root only | — | Runtime-global permission mode, e.g. `auto` |

@@ -1598,7 +1598,7 @@ func TestWriteAgentYAML_LegacySidecarCleanupFailureIsDeferred(t *testing.T) {
 
 // TestWriteAgentYAML_SystemPromptExternalized covers the default
 // systemPromptFile externalization (issue #17 follow-up): long prompts are
-// staged into prompts/<id>-<sha8>.md and the YAML entry only carries a
+// staged into prompts/<id>-<sha256>.md and the YAML entry only carries a
 // relative reference; agents without a prompt write nothing.
 func TestWriteAgentYAML_SystemPromptExternalized(t *testing.T) {
 	dir := t.TempDir()
@@ -1799,4 +1799,42 @@ func TestWriteAgentYAML_PromptGCReclaimsSupersededGenerations(t *testing.T) {
 	entries, err = os.ReadDir(promptsDir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "prompts removed from the graph must be reclaimed")
+}
+
+// TestWriteAgentYAML_PromptStagingSymlinkCannotEscape guards the write-side
+// containment rule: a pre-planted symlink squatting on the staging name must
+// not let the writer clobber a file outside prompts/. os.CreateTemp uses a
+// random sibling name with O_EXCL semantics and never follows a pre-existing
+// symlink, unlike a fixed-name os.Create (O_TRUNC would follow the link).
+func TestWriteAgentYAML_PromptStagingSymlinkCannotEscape(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	require.NoError(t, os.WriteFile(victim, []byte("original"), 0644))
+	store := NewAgentStorage(dir)
+	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}
+	agents := []model.AgentDefinition{
+		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "The prompt"},
+	}
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	promptsDir := filepath.Join(dir, "parent", "agents", "prompts")
+	entries, err := os.ReadDir(promptsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	finalName := entries[0].Name()
+
+	// Corrupt the prompt file so the redeploy must exercise the staging
+	// path, and squat on it with a symlink pointing at the victim.
+	require.NoError(t, os.WriteFile(filepath.Join(promptsDir, finalName), []byte("corrupted"), 0644))
+	symPath := filepath.Join(promptsDir, finalName+".tmp")
+	require.NoError(t, os.Symlink(victim, symPath))
+
+	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+
+	content, rerr := os.ReadFile(filepath.Join(promptsDir, finalName))
+	require.NoError(t, rerr)
+	assert.Equal(t, "The prompt", string(content), "prompt file must be repaired via the staging path")
+	victimContent, rerr := os.ReadFile(victim)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original", string(victimContent),
+		"prompt staging must never clobber files outside prompts/ via a squatting symlink")
 }
