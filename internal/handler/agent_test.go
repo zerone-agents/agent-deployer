@@ -20,6 +20,7 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/docker"
 	"github.com/zerone-agent/agent-deployer/internal/handler"
 	"github.com/zerone-agent/agent-deployer/internal/model"
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 	"github.com/zerone-agent/agent-deployer/internal/service"
 )
 
@@ -41,8 +42,8 @@ func newFakeDockerForHandler() *fakeDockerForHandler {
 	}
 }
 
-func (f *fakeDockerForHandler) FindAgentContainer(_ context.Context, deploymentKey string) (*docker.RuntimeContainer, error) {
-	c, ok := f.containers[deploymentKey]
+func (f *fakeDockerForHandler) FindAgentContainer(_ context.Context, deploymentKey naming.DeploymentKey) (*docker.RuntimeContainer, error) {
+	c, ok := f.containers[string(deploymentKey)]
 	if !ok {
 		return nil, nil
 	}
@@ -61,7 +62,7 @@ func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts dock
 	port := f.nextPort
 	f.nextPort++
 	c := &docker.RuntimeContainer{
-		ID:            "cid-" + opts.DeploymentKey,
+		ID:            "cid-" + string(opts.DeploymentKey),
 		Name:          opts.ContainerName,
 		DeploymentKey: opts.DeploymentKey,
 		RootAgentID:   opts.RootAgentID,
@@ -70,7 +71,7 @@ func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts dock
 		HostPort:      port,
 		Image:         opts.Image,
 	}
-	f.containers[opts.DeploymentKey] = c
+	f.containers[string(opts.DeploymentKey)] = c
 	f.tokens[c.ID] = opts.RuntimeToken
 	return c.ID, port, nil
 }

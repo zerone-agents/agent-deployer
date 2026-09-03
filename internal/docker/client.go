@@ -17,6 +17,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
+
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 )
 
 // Docker labels applied to every managed container. They are used both for
@@ -45,10 +47,10 @@ type Client struct {
 type CreateOpts struct {
 	// DeploymentKey is the deployment resource identity (issue #18): it keys
 	// the container labels used for lookup and bookkeeping.
-	DeploymentKey string
+	DeploymentKey naming.DeploymentKey
 	// RootAgentID is the bare runtime root agent id, recorded on the
 	// agent.root-id label for read-back in Get/List/Status responses.
-	RootAgentID          string
+	RootAgentID          naming.RootAgentID
 	InstanceID           string
 	ContainerName        string
 	Image                string
@@ -87,13 +89,13 @@ func (c *Client) Ping(ctx context.Context) (types.Ping, error) {
 // container. It isolates callers from the Docker SDK types.
 type RuntimeContainer struct {
 	ID            string
-	Name          string // container name without leading "/"
-	DeploymentKey string // from label agent-deployer/agent.name
-	RootAgentID   string // from label agent-deployer/agent.root-id; "" on pre-split containers
-	InstanceID    string // from label agent-deployer/agent.instance-id
-	Status        string // raw Docker state: "running", "exited", "created", etc.
-	Health        string // Docker health: "starting", "healthy", "unhealthy", "" when no healthcheck
-	HostPort      int    // first public port binding, 0 if none
+	Name          string               // container name without leading "/"
+	DeploymentKey naming.DeploymentKey // from label agent-deployer/agent.name
+	RootAgentID   naming.RootAgentID   // from label agent-deployer/agent.root-id; "" on pre-split containers
+	InstanceID    string               // from label agent-deployer/agent.instance-id
+	Status        string               // raw Docker state: "running", "exited", "created", etc.
+	Health        string               // Docker health: "starting", "healthy", "unhealthy", "" when no healthcheck
+	HostPort      int                  // first public port binding, 0 if none
 	Image         string
 	CreatedAt     string // RFC3339 UTC from label agent-deployer/agent.created-at; "" if missing
 }
@@ -107,8 +109,8 @@ func toRuntimeContainer(c types.Container) RuntimeContainer {
 	rc := RuntimeContainer{
 		ID:            c.ID,
 		Name:          name,
-		DeploymentKey: c.Labels[LabelAgentName],
-		RootAgentID:   c.Labels[LabelRootAgentID],
+		DeploymentKey: naming.DeploymentKey(c.Labels[LabelAgentName]),
+		RootAgentID:   naming.RootAgentID(c.Labels[LabelRootAgentID]),
 		InstanceID:    c.Labels[LabelInstanceID],
 		Status:        c.State,
 		Image:         c.Image,
@@ -125,7 +127,7 @@ func toRuntimeContainer(c types.Container) RuntimeContainer {
 
 // FindAgentContainer returns the managed container for the given deployment
 // key, or (nil, nil) if no such container exists.
-func (c *Client) FindAgentContainer(ctx context.Context, deploymentKey string) (*RuntimeContainer, error) {
+func (c *Client) FindAgentContainer(ctx context.Context, deploymentKey naming.DeploymentKey) (*RuntimeContainer, error) {
 	containers, err := c.cli.ContainerList(ctx, container.ListOptions{
 		All: true,
 		Filters: filters.NewArgs(
@@ -184,8 +186,8 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Run
 	}
 
 	if info.Config.Labels != nil {
-		rc.DeploymentKey = info.Config.Labels[LabelAgentName]
-		rc.RootAgentID = info.Config.Labels[LabelRootAgentID]
+		rc.DeploymentKey = naming.DeploymentKey(info.Config.Labels[LabelAgentName])
+		rc.RootAgentID = naming.RootAgentID(info.Config.Labels[LabelRootAgentID])
 		rc.InstanceID = info.Config.Labels[LabelInstanceID]
 		rc.CreatedAt = info.Config.Labels[LabelCreatedAt]
 	}
@@ -220,8 +222,8 @@ func (c *Client) CreateAgentContainer(ctx context.Context, opts CreateOpts) (str
 
 	labels := map[string]string{
 		LabelManaged:     "true",
-		LabelAgentName:   opts.DeploymentKey,
-		LabelRootAgentID: opts.RootAgentID,
+		LabelAgentName:   string(opts.DeploymentKey),
+		LabelRootAgentID: string(opts.RootAgentID),
 		LabelInstanceID:  opts.InstanceID,
 		LabelCreatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}

@@ -125,10 +125,10 @@ type runtimeAgentsYAML struct {
 // toolPaths maps agent id -> verified "./tools/..." paths for that agent.
 // Agents that declare skills get their per-agent skill dir injected as an
 // extraUserSkillDirs entry (user-level scan; see the service install layout).
-func (s *AgentStorage) WriteAgentYAML(deploymentKey string, rootAgentID string, agents []model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, toolPaths map[string][]string) error {
+func (s *AgentStorage) WriteAgentYAML(deploymentKey naming.DeploymentKey, rootAgentID naming.RootAgentID, agents []model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, toolPaths map[string][]string) error {
 	// Defense-in-depth: reject path traversal in the deployment key so a
 	// caller cannot escape dataDir via "../" or absolute paths.
-	if deploymentKey == "" || deploymentKey == "." || deploymentKey == ".." || strings.ContainsAny(deploymentKey, `/\`) {
+	if deploymentKey == "" || deploymentKey == "." || deploymentKey == ".." || strings.ContainsAny(string(deploymentKey), `/\`) {
 		return fmt.Errorf("invalid deployment key %q: must be a single path segment", deploymentKey)
 	}
 
@@ -136,7 +136,7 @@ func (s *AgentStorage) WriteAgentYAML(deploymentKey string, rootAgentID string, 
 	for _, a := range agents {
 		byID[a.Name] = true
 	}
-	if !byID[rootAgentID] {
+	if !byID[string(rootAgentID)] {
 		return fmt.Errorf("no agent with id %q in graph", rootAgentID)
 	}
 	promptRefs := computeSystemPromptRefs(agents)
@@ -164,7 +164,7 @@ func (s *AgentStorage) WriteAgentYAML(deploymentKey string, rootAgentID string, 
 			entry.SystemPromptFile = ref
 		}
 
-		if a.Name == rootAgentID {
+		if a.Name == string(rootAgentID) {
 			// Runtime-global execution environment (issue #16): credentials and
 			// model on the root entry only; mounted agents reuse the root
 			// process environment and never receive their own copy.
@@ -199,7 +199,7 @@ func (s *AgentStorage) WriteAgentYAML(deploymentKey string, rootAgentID string, 
 		entries = append(entries, entry)
 	}
 
-	doc := runtimeAgentsYAML{Agents: entries, XDeployerRootID: rootAgentID}
+	doc := runtimeAgentsYAML{Agents: entries, XDeployerRootID: string(rootAgentID)}
 
 	// Embed the artifact declarations that the runtime schema cannot express.
 	// Keeping them in the SAME file is what makes the update transactional:
@@ -246,7 +246,7 @@ func (s *AgentStorage) WriteAgentYAML(deploymentKey string, rootAgentID string, 
 		return fmt.Errorf("marshal agent YAML: %w", err)
 	}
 
-	agentDir := filepath.Join(s.dataDir, deploymentKey, "agents")
+	agentDir := filepath.Join(s.dataDir, string(deploymentKey), "agents")
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return fmt.Errorf("create agent directory: %w", err)
 	}
@@ -427,8 +427,8 @@ type agentArtifacts struct {
 // never "artifacts resurrected". A missing manifest (pre-manifest or
 // hand-written deployments) likewise reads back artifact-free; a corrupt
 // manifest fails explicitly because a silently lossy round trip is worse.
-func (s *AgentStorage) loadDeploymentManifest(name string, graph *AgentGraph, yamlDigest string) error {
-	data, err := os.ReadFile(filepath.Join(s.dataDir, name, "agents", "deploy-manifest.json"))
+func (s *AgentStorage) loadDeploymentManifest(deploymentKey naming.DeploymentKey, graph *AgentGraph, yamlDigest string) error {
+	data, err := os.ReadFile(filepath.Join(s.dataDir, string(deploymentKey), "agents", "deploy-manifest.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -461,7 +461,7 @@ func sha256Hex(data []byte) string {
 
 // AgentGraph is the complete agent graph read back from agents.yaml.
 type AgentGraph struct {
-	RootAgentID string
+	RootAgentID naming.RootAgentID
 	Agents      []model.AgentDefinition
 }
 
@@ -475,8 +475,8 @@ type AgentGraph struct {
 // file; a legacy deploy-manifest.json sidecar from pre-embedded-section
 // versions is honored for compatibility (digest-bound) only when the section
 // is absent.
-func (s *AgentStorage) ReadAgentYAML(deploymentKey string) (*AgentGraph, error) {
-	filePath := filepath.Join(s.dataDir, deploymentKey, "agents", "agents.yaml")
+func (s *AgentStorage) ReadAgentYAML(deploymentKey naming.DeploymentKey) (*AgentGraph, error) {
+	filePath := filepath.Join(s.dataDir, string(deploymentKey), "agents", "agents.yaml")
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("read agent YAML: %w", err)
@@ -491,9 +491,9 @@ func (s *AgentStorage) ReadAgentYAML(deploymentKey string) (*AgentGraph, error) 
 		return nil, ErrNoAgents
 	}
 
-	rootID := doc.XDeployerRootID
+	rootID := naming.RootAgentID(doc.XDeployerRootID)
 	if rootID == "" {
-		rootID = deploymentKey
+		rootID = naming.RootAgentID(string(deploymentKey))
 	}
 	graph := &AgentGraph{RootAgentID: rootID}
 	foundRoot := false
@@ -502,7 +502,7 @@ func (s *AgentStorage) ReadAgentYAML(deploymentKey string) (*AgentGraph, error) 
 		if entryName == "" {
 			entryName = e.ID
 		}
-		if e.ID == rootID {
+		if e.ID == string(rootID) {
 			foundRoot = true
 		}
 		def := model.AgentDefinition{
@@ -531,12 +531,12 @@ func (s *AgentStorage) ReadAgentYAML(deploymentKey string) (*AgentGraph, error) 
 			if !strings.HasPrefix(clean, "prompts"+string(filepath.Separator)) {
 				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory", entryName, e.SystemPromptFile)
 			}
-			target := filepath.Join(s.dataDir, deploymentKey, "agents", clean)
+			target := filepath.Join(s.dataDir, string(deploymentKey), "agents", clean)
 			realTarget, rerr := filepath.EvalSymlinks(target)
 			if rerr != nil {
 				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, rerr)
 			}
-			realAgentDir, aerr := filepath.EvalSymlinks(filepath.Join(s.dataDir, deploymentKey, "agents"))
+			realAgentDir, aerr := filepath.EvalSymlinks(filepath.Join(s.dataDir, string(deploymentKey), "agents"))
 			if aerr != nil {
 				return nil, fmt.Errorf("resolve agents directory: %w", aerr)
 			}
@@ -613,26 +613,27 @@ func RemoveAll(path string) error {
 	return nil
 }
 
-// Exists reports whether an agent's storage directory exists on disk.
-// It returns true when <dataDir>/<name>/agents/agents.yaml is present.
-func (s *AgentStorage) Exists(name string) bool {
-	yamlPath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
+// Exists reports whether a deployment's storage directory exists on disk.
+// It returns true when <dataDir>/<deploymentKey>/agents/agents.yaml is present.
+func (s *AgentStorage) Exists(deploymentKey naming.DeploymentKey) bool {
+	yamlPath := filepath.Join(s.dataDir, string(deploymentKey), "agents", "agents.yaml")
 	_, err := os.Stat(yamlPath)
 	return err == nil
 }
 
-// ListAgentDirs scans dataDir and returns the names of all immediate child
-// directories that look like agent storage roots. A directory qualifies when
-// it contains an "agents/agents.yaml" file. The returned slice is sorted.
-// Errors reading dataDir itself are returned; unreadable sub-directories are
-// skipped so that one bad agent directory does not break the whole listing.
-func (s *AgentStorage) ListAgentDirs() ([]string, error) {
+// ListAgentDirs scans dataDir and returns the deployment keys of all
+// immediate child directories that look like deployment storage roots. A
+// directory qualifies when it contains an "agents/agents.yaml" file. The
+// returned slice is sorted. Errors reading dataDir itself are returned;
+// unreadable sub-directories are skipped so that one bad deployment
+// directory does not break the whole listing.
+func (s *AgentStorage) ListAgentDirs() ([]naming.DeploymentKey, error) {
 	entries, err := os.ReadDir(s.dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("read data dir %q: %w", s.dataDir, err)
 	}
 
-	names := make([]string, 0, len(entries))
+	names := make([]naming.DeploymentKey, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -651,9 +652,9 @@ func (s *AgentStorage) ListAgentDirs() ([]string, error) {
 			// Skip unreadable entries gracefully.
 			continue
 		}
-		names = append(names, name)
+		names = append(names, naming.DeploymentKey(name))
 	}
 
-	sort.Strings(names)
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
 	return names, nil
 }

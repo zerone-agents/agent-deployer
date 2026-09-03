@@ -41,7 +41,7 @@ var (
 // DockerClient captures the subset of the docker.Client surface used by the
 // AgentService. Defining it as an interface allows tests to inject a fake.
 type DockerClient interface {
-	FindAgentContainer(ctx context.Context, deploymentKey string) (*docker.RuntimeContainer, error)
+	FindAgentContainer(ctx context.Context, deploymentKey naming.DeploymentKey) (*docker.RuntimeContainer, error)
 	ListManagedContainers(ctx context.Context) ([]docker.RuntimeContainer, error)
 	CreateAgentContainer(ctx context.Context, opts docker.CreateOpts) (string, int, error)
 	StopContainer(ctx context.Context, id string) error
@@ -136,8 +136,8 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	instanceID := naming.InstanceID()
 	containerName := naming.ContainerName("cloud-agent", deploymentKey, instanceID)
 
-	agentDir := filepath.Join(s.cfg.DataDir, deploymentKey, "agents")
-	sessionDir := filepath.Join(s.cfg.DataDir, deploymentKey, "sessions")
+	agentDir := filepath.Join(s.cfg.DataDir, string(deploymentKey), "agents")
+	sessionDir := filepath.Join(s.cfg.DataDir, string(deploymentKey), "sessions")
 	closureSkillsRoot := filepath.Join(agentDir, "skills")
 
 	if err := storage.EnsureDirs(agentDir, sessionDir); err != nil {
@@ -212,16 +212,34 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	}, true, nil
 }
 
+// findManagedContainer resolves a lifecycle path parameter to the managed
+// container: sanitize → FindAgentContainer → error wrapping. A nil container
+// WITHOUT error means "no such deployment" — each caller decides whether that
+// is fatal (lifecycle ops), an archived fallback (Get), or a no-op (Delete).
+func (s *AgentService) findManagedContainer(ctx context.Context, name string) (*docker.RuntimeContainer, naming.DeploymentKey, error) {
+	deploymentKey := naming.DeploymentKey(naming.SanitizeName(name))
+	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	if err != nil {
+		return nil, deploymentKey, fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+	}
+	return c, deploymentKey, nil
+}
+
+// deploymentNotFound builds the standard ErrAgentNotFound error for lifecycle
+// lookups that require an existing deployment.
+func deploymentNotFound(deploymentKey naming.DeploymentKey) error {
+	return fmt.Errorf("deployment %q: %w", deploymentKey, ErrAgentNotFound)
+}
+
 // Get returns information about a deployment (keyed by deployment key). If a
 // managed container exists, the response reflects the container; otherwise,
 // if on-disk data remains (the agent was deleted without purge), the response
 // represents the archived agent. Only when neither a container nor data
 // exists is ErrAgentNotFound returned.
 func (s *AgentService) Get(ctx context.Context, name string) (*model.AgentResponse, error) {
-	deploymentKey := naming.SanitizeName(name)
-	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	c, deploymentKey, err := s.findManagedContainer(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+		return nil, err
 	}
 	if c != nil {
 		return s.toResponse(c), nil
@@ -231,7 +249,7 @@ func (s *AgentService) Get(ctx context.Context, name string) (*model.AgentRespon
 	if s.storage.Exists(deploymentKey) {
 		return s.toArchivedResponse(deploymentKey), nil
 	}
-	return nil, fmt.Errorf("deployment %q: %w", deploymentKey, ErrAgentNotFound)
+	return nil, deploymentNotFound(deploymentKey)
 }
 
 // List returns information about all managed agent containers. When
@@ -247,7 +265,7 @@ func (s *AgentService) List(ctx context.Context, includeArchived bool) ([]model.
 		return nil, fmt.Errorf("list managed containers: %w", err)
 	}
 
-	responses := make(map[string]model.AgentResponse, len(containers))
+	responses := make(map[naming.DeploymentKey]model.AgentResponse, len(containers))
 	for i := range containers {
 		r := s.toResponse(&containers[i])
 		responses[r.DeploymentKey] = *r
@@ -281,13 +299,12 @@ func (s *AgentService) List(ctx context.Context, includeArchived bool) ([]model.
 // deployment key), including the health-check result. Clients poll this
 // after Create to detect readiness.
 func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.AgentStatusResponse, error) {
-	deploymentKey := naming.SanitizeName(name)
-	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	c, deploymentKey, err := s.findManagedContainer(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+		return nil, err
 	}
 	if c == nil {
-		return nil, fmt.Errorf("deployment %q: %w", deploymentKey, ErrAgentNotFound)
+		return nil, deploymentNotFound(deploymentKey)
 	}
 
 	// Inspect for health-check status (FindAgentContainer doesn't populate Health).
@@ -325,26 +342,24 @@ func (s *AgentService) GetStatus(ctx context.Context, name string) (*model.Agent
 
 // GetLogs returns the last `tail` lines of the deployment's container output.
 func (s *AgentService) GetLogs(ctx context.Context, name string, tail int) (string, error) {
-	deploymentKey := naming.SanitizeName(name)
-	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	c, deploymentKey, err := s.findManagedContainer(ctx, name)
 	if err != nil {
-		return "", fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+		return "", err
 	}
 	if c == nil {
-		return "", fmt.Errorf("deployment %q: %w", deploymentKey, ErrAgentNotFound)
+		return "", deploymentNotFound(deploymentKey)
 	}
 	return s.dc.ContainerLogs(ctx, c.ID, tail)
 }
 
 // Stop stops a deployment's container.
 func (s *AgentService) Stop(ctx context.Context, name string) error {
-	deploymentKey := naming.SanitizeName(name)
-	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	c, deploymentKey, err := s.findManagedContainer(ctx, name)
 	if err != nil {
-		return fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+		return err
 	}
 	if c == nil {
-		return fmt.Errorf("deployment %q: %w", deploymentKey, ErrAgentNotFound)
+		return deploymentNotFound(deploymentKey)
 	}
 	if err := s.dc.StopContainer(ctx, c.ID); err != nil {
 		return fmt.Errorf("stop container %s: %w", c.ID, err)
@@ -354,13 +369,12 @@ func (s *AgentService) Stop(ctx context.Context, name string) error {
 
 // Restart restarts a deployment's container.
 func (s *AgentService) Restart(ctx context.Context, name string) error {
-	deploymentKey := naming.SanitizeName(name)
-	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	c, deploymentKey, err := s.findManagedContainer(ctx, name)
 	if err != nil {
-		return fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+		return err
 	}
 	if c == nil {
-		return fmt.Errorf("deployment %q: %w", deploymentKey, ErrAgentNotFound)
+		return deploymentNotFound(deploymentKey)
 	}
 	if err := s.dc.RestartContainer(ctx, c.ID); err != nil {
 		return fmt.Errorf("restart container %s: %w", c.ID, err)
@@ -372,12 +386,12 @@ func (s *AgentService) Restart(ctx context.Context, name string) error {
 // default the per-deployment data on disk is preserved so the agent becomes
 // "archived" and can still be discovered via List(includeArchived=true).
 // When purge is true, the container AND the on-disk data are removed
-// (best-effort).
+// (best-effort). Deleting a deployment with neither container nor data is a
+// successful no-op.
 func (s *AgentService) Delete(ctx context.Context, name string, purge bool) error {
-	deploymentKey := naming.SanitizeName(name)
-	c, err := s.dc.FindAgentContainer(ctx, deploymentKey)
+	c, deploymentKey, err := s.findManagedContainer(ctx, name)
 	if err != nil {
-		return fmt.Errorf("find container for deployment %q: %w", deploymentKey, err)
+		return err
 	}
 
 	if c != nil {
@@ -391,7 +405,7 @@ func (s *AgentService) Delete(ctx context.Context, name string, purge bool) erro
 
 	if purge {
 		// Remove the entire per-deployment directory (agents + sessions + skills).
-		_ = storage.RemoveAll(filepath.Join(s.cfg.DataDir, deploymentKey))
+		_ = storage.RemoveAll(filepath.Join(s.cfg.DataDir, string(deploymentKey)))
 	}
 
 	return nil
@@ -403,7 +417,7 @@ func (s *AgentService) Delete(ctx context.Context, name string, purge bool) erro
 // on pre-split containers), and the CreatedAt timestamp from the Docker
 // label. Unknown Docker statuses are normalized to model.StatusUnknown.
 func (s *AgentService) toResponse(c *docker.RuntimeContainer) *model.AgentResponse {
-	agentDir := filepath.Join(s.cfg.DataDir, c.DeploymentKey, "agents")
+	agentDir := filepath.Join(s.cfg.DataDir, string(c.DeploymentKey), "agents")
 	return &model.AgentResponse{
 		AgentName:     c.RootAgentID,
 		DeploymentKey: c.DeploymentKey,
@@ -414,7 +428,7 @@ func (s *AgentService) toResponse(c *docker.RuntimeContainer) *model.AgentRespon
 		HostPort:      c.HostPort,
 		CreatedAt:     c.CreatedAt,
 		YamlPath:      filepath.Join(agentDir, "agents.yaml"),
-		SessionDir:    filepath.Join(s.cfg.DataDir, c.DeploymentKey, "sessions"),
+		SessionDir:    filepath.Join(s.cfg.DataDir, string(c.DeploymentKey), "sessions"),
 		SkillsDir:     filepath.Join(agentDir, "skills"),
 	}
 }
@@ -434,14 +448,14 @@ func toStatus(raw string) model.AgentStatus {
 // includeArchived is true. All container-derived fields are empty, status is
 // "archived", and the entry is keyed by deployment key alone — the bare root
 // agent id is not recoverable without parsing agents.yaml.
-func (s *AgentService) toArchivedResponse(deploymentKey string) *model.AgentResponse {
+func (s *AgentService) toArchivedResponse(deploymentKey naming.DeploymentKey) *model.AgentResponse {
 	return &model.AgentResponse{
 		AgentName:     "",
 		DeploymentKey: deploymentKey,
 		Status:        model.StatusArchived,
-		YamlPath:      filepath.Join(s.cfg.DataDir, deploymentKey, "agents", "agents.yaml"),
-		SessionDir:    filepath.Join(s.cfg.DataDir, deploymentKey, "sessions"),
-		SkillsDir:     filepath.Join(s.cfg.DataDir, deploymentKey, "agents", "skills"),
+		YamlPath:      filepath.Join(s.cfg.DataDir, string(deploymentKey), "agents", "agents.yaml"),
+		SessionDir:    filepath.Join(s.cfg.DataDir, string(deploymentKey), "sessions"),
+		SkillsDir:     filepath.Join(s.cfg.DataDir, string(deploymentKey), "agents", "skills"),
 	}
 }
 

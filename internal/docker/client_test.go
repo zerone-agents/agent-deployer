@@ -5,6 +5,8 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 )
 
 func TestBuildEnvVars_OnlyHTTPAPIKey(t *testing.T) {
@@ -39,9 +41,9 @@ func TestToRuntimeContainer(t *testing.T) {
 	rc := toRuntimeContainer(input)
 	assert.Equal(t, "abc123", rc.ID)
 	assert.Equal(t, "cloud-agent-coder-aaaaaaaa", rc.Name)
-	assert.Equal(t, "coder", rc.DeploymentKey,
+	assert.Equal(t, naming.DeploymentKey("coder"), rc.DeploymentKey,
 		"deployment key comes from the agent.name label (issue #18)")
-	assert.Equal(t, "coder", rc.RootAgentID,
+	assert.Equal(t, naming.RootAgentID("coder"), rc.RootAgentID,
 		"bare root agent id comes from the agent.root-id label")
 	assert.Equal(t, "aaaaaaaa", rc.InstanceID)
 	assert.Equal(t, "running", rc.Status)

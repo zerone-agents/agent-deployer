@@ -41,6 +41,7 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/docker"
 	"github.com/zerone-agent/agent-deployer/internal/handler"
 	"github.com/zerone-agent/agent-deployer/internal/model"
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 	"github.com/zerone-agent/agent-deployer/internal/service"
 	"gopkg.in/yaml.v3"
 )
@@ -93,8 +94,8 @@ func newStack(t *testing.T) (*service.AgentService, *gin.Engine) {
 
 func validCreateBody(name string) []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID:   name,
-		DeploymentKey: name,
+		RootAgentID:   naming.RootAgentID(name),
+		DeploymentKey: naming.DeploymentKey(name),
 		Agents: []model.AgentDefinition{
 			{
 				Name:         name,
@@ -158,7 +159,7 @@ func TestIntegration_AgentLifecycle(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
 	assert.True(t, createResp.Success)
-	assert.Equal(t, agentName, createResp.Data.AgentName)
+	assert.Equal(t, naming.RootAgentID(agentName), createResp.Data.AgentName)
 	assert.NotEmpty(t, createResp.Data.ContainerID)
 	assert.NotEmpty(t, createResp.Data.ContainerName)
 	assert.NotEmpty(t, createResp.Data.HostPort)
@@ -181,7 +182,7 @@ func TestIntegration_AgentLifecycle(t *testing.T) {
 		Data model.AgentResponse `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(w3.Body.Bytes(), &getResp))
-	assert.Equal(t, agentName, getResp.Data.AgentName)
+	assert.Equal(t, naming.RootAgentID(agentName), getResp.Data.AgentName)
 
 	// 4. List contains our agent
 	w4 := doRequest(t, r, "GET", "/api/v1/agents", nil)
@@ -192,7 +193,7 @@ func TestIntegration_AgentLifecycle(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w4.Body.Bytes(), &listResp))
 	found := false
 	for _, a := range listResp.Data {
-		if a.AgentName == agentName {
+		if a.AgentName == naming.RootAgentID(agentName) {
 			found = true
 			break
 		}
@@ -270,7 +271,7 @@ func TestIntegration_CreateWithForce(t *testing.T) {
 
 	assert.NotEqual(t, firstContainerID, second.Data.ContainerID,
 		"force create should produce a new container ID")
-	assert.Equal(t, agentName, second.Data.AgentName)
+	assert.Equal(t, naming.RootAgentID(agentName), second.Data.AgentName)
 }
 
 // TestIntegration_AgentLifecycle_WithSkills exercises the full skill install
@@ -307,8 +308,8 @@ func TestIntegration_AgentLifecycle_WithSkills(t *testing.T) {
 
 	// Build a CreateAgentRequest with one skill source on the root agent.
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID:   agentName,
-		DeploymentKey: agentName,
+		RootAgentID:   naming.RootAgentID(agentName),
+		DeploymentKey: naming.DeploymentKey(agentName),
 		Agents: []model.AgentDefinition{
 			{
 				Name:           agentName,
@@ -387,8 +388,8 @@ func TestIntegration_AgentGraphLifecycle(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID:   agentName,
-		DeploymentKey: agentName,
+		RootAgentID:   naming.RootAgentID(agentName),
+		DeploymentKey: naming.DeploymentKey(agentName),
 		Agents: []model.AgentDefinition{
 			{
 				Name:         agentName,
@@ -536,8 +537,8 @@ export default {
 	t.Cleanup(srv.Close)
 
 	body, err := json.Marshal(model.CreateAgentRequest{
-		RootAgentID:   agentName,
-		DeploymentKey: agentName,
+		RootAgentID:   naming.RootAgentID(agentName),
+		DeploymentKey: naming.DeploymentKey(agentName),
 		Agents: []model.AgentDefinition{
 			{
 				Name: agentName, Description: "Coordinates work",
@@ -1298,7 +1299,7 @@ func TestIntegration_DeploymentKeySplit(t *testing.T) {
 
 	body, err := json.Marshal(model.CreateAgentRequest{
 		RootAgentID:   "assistant",
-		DeploymentKey: deploymentKey,
+		DeploymentKey: naming.DeploymentKey(deploymentKey),
 		Agents: []model.AgentDefinition{
 			{
 				Name: "assistant", Description: "split acceptance agent",
@@ -1323,9 +1324,9 @@ func TestIntegration_DeploymentKeySplit(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &createResp))
 	assert.True(t, createResp.Success)
-	assert.Equal(t, "assistant", createResp.Data.AgentName,
+	assert.Equal(t, naming.RootAgentID("assistant"), createResp.Data.AgentName,
 		"response agentName is the bare runtime root id")
-	assert.Equal(t, deploymentKey, createResp.Data.DeploymentKey,
+	assert.Equal(t, naming.DeploymentKey(deploymentKey), createResp.Data.DeploymentKey,
 		"response deploymentKey is the tenant-scoped infra key")
 	assert.Contains(t, createResp.Data.ContainerName, "cloud-agent-"+deploymentKey+"-",
 		"container name derives from the deployment key")
@@ -1343,11 +1344,11 @@ func TestIntegration_DeploymentKeySplit(t *testing.T) {
 	dc, err := docker.NewClient()
 	require.NoError(t, err)
 	defer dc.Close()
-	rc, err := dc.FindAgentContainer(context.Background(), deploymentKey)
+	rc, err := dc.FindAgentContainer(context.Background(), naming.DeploymentKey(deploymentKey))
 	require.NoError(t, err)
 	require.NotNil(t, rc, "container must be findable by deployment key")
-	assert.Equal(t, deploymentKey, rc.DeploymentKey)
-	assert.Equal(t, "assistant", rc.RootAgentID)
+	assert.Equal(t, naming.DeploymentKey(deploymentKey), rc.DeploymentKey)
+	assert.Equal(t, naming.RootAgentID("assistant"), rc.RootAgentID)
 
 	// 4. Lifecycle lookups key on the deployment key alone.
 	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/"+deploymentKey+"/status", nil)

@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 )
 
 func intPtr(v int) *int {
@@ -598,7 +600,7 @@ func TestCreateAgentRequest_JSONUnmarshal(t *testing.T) {
 	err := json.Unmarshal([]byte(jsonData), &req)
 	require.NoError(t, err)
 
-	assert.Equal(t, "coder", req.RootAgentID)
+	assert.Equal(t, naming.RootAgentID("coder"), req.RootAgentID)
 	require.Len(t, req.Agents, 2)
 	root := req.Agents[0]
 	assert.Equal(t, "coder", root.Name)

@@ -21,6 +21,7 @@ import (
 	"github.com/zerone-agent/agent-deployer/internal/config"
 	"github.com/zerone-agent/agent-deployer/internal/docker"
 	"github.com/zerone-agent/agent-deployer/internal/model"
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 )
 
 // fakeDockerClient is a test double for the DockerClient interface.
@@ -35,7 +36,7 @@ type fakeDockerClient struct {
 	findErr    error
 }
 
-func (f *fakeDockerClient) FindAgentContainer(ctx context.Context, deploymentKey string) (*docker.RuntimeContainer, error) {
+func (f *fakeDockerClient) FindAgentContainer(ctx context.Context, deploymentKey naming.DeploymentKey) (*docker.RuntimeContainer, error) {
 	if f.findErr != nil {
 		return nil, f.findErr
 	}
@@ -594,7 +595,7 @@ func TestAgentService_List_IncludeArchived(t *testing.T) {
 	responses, err := svc.List(context.Background(), false)
 	require.NoError(t, err)
 	assert.Len(t, responses, 1, "default List must not include archived agents")
-	assert.Equal(t, "active-agent", responses[0].AgentName)
+	assert.Equal(t, naming.RootAgentID("active-agent"), responses[0].AgentName)
 	assert.Equal(t, model.StatusRunning, responses[0].Status)
 
 	// includeArchived=true: both active and archived.
@@ -603,10 +604,10 @@ func TestAgentService_List_IncludeArchived(t *testing.T) {
 	require.Len(t, responses, 2, "includeArchived must merge active + archived")
 
 	archived := responses[0]
-	if archived.DeploymentKey != archivedName {
+	if archived.DeploymentKey != naming.DeploymentKey(archivedName) {
 		archived = responses[1]
 	}
-	assert.Equal(t, archivedName, archived.DeploymentKey)
+	assert.Equal(t, naming.DeploymentKey(archivedName), archived.DeploymentKey)
 	assert.Equal(t, model.StatusArchived, archived.Status)
 	assert.Empty(t, archived.ContainerID, "archived agent must have no container id")
 	assert.Equal(t, 0, archived.HostPort, "archived agent must have no host port")
@@ -630,7 +631,7 @@ func TestAgentService_Get_Archived(t *testing.T) {
 	// Archived entries are keyed by deployment key alone (issue #18): the
 	// bare root id is not recovered from disk here.
 	assert.Empty(t, resp.AgentName)
-	assert.Equal(t, "coder", resp.DeploymentKey)
+	assert.Equal(t, naming.DeploymentKey("coder"), resp.DeploymentKey)
 	assert.Equal(t, model.StatusArchived, resp.Status)
 	assert.Empty(t, resp.ContainerID)
 	assert.Equal(t, filepath.Join(dataDir, "coder", "agents", "agents.yaml"), resp.YamlPath)
@@ -1335,16 +1336,16 @@ func TestAgentService_Create_DeploymentKeySplitFromRootID(t *testing.T) {
 	resp, created, err := svc.Create(context.Background(), req)
 	require.NoError(t, err)
 	require.True(t, created)
-	assert.Equal(t, "assistant", resp.AgentName,
+	assert.Equal(t, naming.RootAgentID("assistant"), resp.AgentName,
 		"agentName is the bare runtime root id")
-	assert.Equal(t, "acme-assistant", resp.DeploymentKey,
+	assert.Equal(t, naming.DeploymentKey("acme-assistant"), resp.DeploymentKey,
 		"deploymentKey is the infra resource key")
 
 	opts := fake.created
 	require.NotNil(t, opts)
-	assert.Equal(t, "acme-assistant", opts.DeploymentKey,
+	assert.Equal(t, naming.DeploymentKey("acme-assistant"), opts.DeploymentKey,
 		"docker opts must be keyed by the deployment key")
-	assert.Equal(t, "assistant", opts.RootAgentID,
+	assert.Equal(t, naming.RootAgentID("assistant"), opts.RootAgentID,
 		"docker opts must carry the bare root id for the root-id label")
 	assert.Contains(t, opts.ContainerName, "cloud-agent-acme-assistant-",
 		"container name derives from the deployment key")
@@ -1394,8 +1395,8 @@ func TestAgentService_Create_SameRootAgentIDDifferentDeploymentKeysCoexist(t *te
 	require.NoError(t, err)
 	require.True(t, created,
 		"a different deployment key must NOT be treated as idempotent reuse of the existing agent")
-	assert.Equal(t, "globex-assistant", resp.DeploymentKey)
-	assert.Equal(t, "assistant", resp.AgentName)
+	assert.Equal(t, naming.DeploymentKey("globex-assistant"), resp.DeploymentKey)
+	assert.Equal(t, naming.RootAgentID("assistant"), resp.AgentName)
 
 	// Both deployments' resources coexist under their own keys.
 	assert.FileExists(t, filepath.Join(dataDir, "acme-assistant", "agents", "agents.yaml"))
