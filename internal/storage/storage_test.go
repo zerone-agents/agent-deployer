@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zerone-agent/agent-deployer/internal/model"
+	"github.com/zerone-agent/agent-deployer/internal/naming"
 	"gopkg.in/yaml.v3"
 )
 
@@ -106,7 +107,7 @@ func TestReadAgentYAML_Runtime20RoundTrip(t *testing.T) {
 
 	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
-	assert.Equal(t, "coder", graph.RootAgentID)
+	assert.Equal(t, naming.RootAgentID("coder"), graph.RootAgentID)
 	require.Len(t, graph.Agents, 2)
 	assert.Equal(t, "coder", graph.Agents[0].Name)
 	assert.Equal(t, "Writes and edits code", graph.Agents[0].Description)
@@ -139,7 +140,7 @@ func TestReadAgentYAML_MainEntryFoundByIDNotPosition(t *testing.T) {
 
 	readAgent, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
-	assert.Equal(t, "coder", readAgent.RootAgentID)
+	assert.Equal(t, naming.RootAgentID("coder"), readAgent.RootAgentID)
 	require.Len(t, readAgent.Agents, 2)
 	byID := map[string]model.AgentDefinition{}
 	for _, a := range readAgent.Agents {
@@ -353,7 +354,7 @@ func TestWriteAgentYAML_PathTraversalRejected(t *testing.T) {
 	cases := []string{"../etc", "a/b", "/abs", ".", ".."}
 	for _, bad := range cases {
 		agent := model.AgentDefinition{Name: bad, Model: "m", SystemPrompt: "p"}
-		err := store.WriteAgentYAML(bad, bad, []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
+		err := store.WriteAgentYAML(naming.DeploymentKey(bad), naming.RootAgentID(bad), []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 		require.Error(t, err, "name %q should be rejected", bad)
 		assert.Contains(t, err.Error(), "must be a single path segment")
 	}
@@ -1208,7 +1209,7 @@ func TestReadAgentYAML_CompleteGraphRoundTrip(t *testing.T) {
 
 	graph, err := store.ReadAgentYAML("parent")
 	require.NoError(t, err)
-	assert.Equal(t, "parent", graph.RootAgentID)
+	assert.Equal(t, naming.RootAgentID("parent"), graph.RootAgentID)
 	require.Len(t, graph.Agents, 2)
 
 	var root, child *model.AgentDefinition
@@ -1850,7 +1851,7 @@ func TestListAgentDirs_AcceptsDotSkillsNames(t *testing.T) {
 	store := NewAgentStorage(dir)
 
 	for _, id := range []string{"alpha", ".skills-prod", "beta"} {
-		require.NoError(t, store.WriteAgentYAML(id, id, []model.AgentDefinition{
+		require.NoError(t, store.WriteAgentYAML(naming.DeploymentKey(id), naming.RootAgentID(id), []model.AgentDefinition{
 			{Name: id, Description: "d", Model: "m", SystemPrompt: "p"},
 		}, model.ProviderConfig{}, nil, nil, nil))
 	}
@@ -1859,7 +1860,7 @@ func TestListAgentDirs_AcceptsDotSkillsNames(t *testing.T) {
 
 	names, err := store.ListAgentDirs()
 	require.NoError(t, err)
-	assert.Equal(t, []string{".skills-prod", "alpha", "beta"}, names,
+	assert.Equal(t, []naming.DeploymentKey{".skills-prod", "alpha", "beta"}, names,
 		"dot-prefixed agent ids must not be filtered from the list")
 }
 
@@ -1924,7 +1925,7 @@ func TestWriteReadAgentYAML_DeploymentKeySplitFromRootID(t *testing.T) {
 
 	graph, err := store.ReadAgentYAML("acme-assistant")
 	require.NoError(t, err)
-	assert.Equal(t, "assistant", graph.RootAgentID,
+	assert.Equal(t, naming.RootAgentID("assistant"), graph.RootAgentID,
 		"read-back must resolve the root via the marker, not the dir name")
 	require.Len(t, graph.Agents, 1)
 	assert.Equal(t, "assistant", graph.Agents[0].Name)
@@ -1963,7 +1964,7 @@ func TestWriteAgentYAML_ScopedKeyRedeployWithBareRoot(t *testing.T) {
 
 	graph, err := store.ReadAgentYAML("acme-assistant")
 	require.NoError(t, err)
-	assert.Equal(t, "assistant", graph.RootAgentID)
+	assert.Equal(t, naming.RootAgentID("assistant"), graph.RootAgentID)
 	require.Len(t, graph.Agents, 1)
 	assert.Equal(t, "assistant", graph.Agents[0].Name,
 		"the redeploy must fully replace the scoped root with the bare one")

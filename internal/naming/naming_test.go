@@ -29,3 +29,16 @@ func TestContainerSkillDir(t *testing.T) {
 		t.Errorf("ContainerSkillDir(\"child-a\") = %q, want /app/config/skills/child-a", got)
 	}
 }
+
+// TestSanitizeName_PreservesTypedIdentity pins the issue #20 contract:
+// SanitizeName is generic over ~string so typed identities round-trip
+// without losing their type, and ContainerName accepts the typed key.
+func TestSanitizeName_PreservesTypedIdentity(t *testing.T) {
+	raw := DeploymentKey("Acme_Assistant")
+	got := SanitizeName(raw)
+	assert.Equal(t, DeploymentKey("acme-assistant"), got,
+		"typed identities must survive sanitization without explicit conversions")
+
+	name := ContainerName("cloud-agent", DeploymentKey("acme-assistant"), "abc123")
+	assert.Equal(t, "cloud-agent-acme-assistant-abc123", name)
+}

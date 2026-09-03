@@ -332,21 +332,23 @@ func (h *HubConfig) Validate() error {
 // (issue #18) is the deployment resource identity — Docker labels, container
 // name, per-deployment directories, lifecycle lookups — and must already be
 // in sanitized form. The two are independent: a tenant-scoped deployment key
-// like "acme-assistant" never leaks into the runtime agent ids.
+// like "acme-assistant" never leaks into the runtime agent ids. The distinct
+// named types (issue #20) keep the adjacent pair from being silently swapped
+// at internal call boundaries.
 type CreateAgentRequest struct {
-	RootAgentID   string            `json:"rootAgentId"`
-	DeploymentKey string            `json:"deploymentKey"`
-	Agents        []AgentDefinition `json:"agents"`
-	Provider      ProviderConfig    `json:"provider"`
-	Aigc          *AigcConfig       `json:"aigc,omitempty"`
-	Force         bool              `json:"force"`
-	RuntimeToken  string            `json:"runtime_token"`
-	Hub           *HubConfig        `json:"hub,omitempty"`
+	RootAgentID   naming.RootAgentID   `json:"rootAgentId"`
+	DeploymentKey naming.DeploymentKey `json:"deploymentKey"`
+	Agents        []AgentDefinition    `json:"agents"`
+	Provider      ProviderConfig       `json:"provider"`
+	Aigc          *AigcConfig          `json:"aigc,omitempty"`
+	Force         bool                 `json:"force"`
+	RuntimeToken  string               `json:"runtime_token"`
+	Hub           *HubConfig           `json:"hub,omitempty"`
 }
 
 // Root returns the root agent definition. Call only after Validate.
 func (r *CreateAgentRequest) Root() *AgentDefinition {
-	a, _ := r.AgentByID(r.RootAgentID)
+	a, _ := r.AgentByID(string(r.RootAgentID))
 	return a
 }
 
@@ -391,17 +393,17 @@ type AgentResponse struct {
 	// Create from the request and from the agent-deployer/agent.root-id
 	// container label otherwise. Empty for pre-split containers and archived
 	// entries, which are keyed by deploymentKey alone.
-	AgentName     string      `json:"agentName"`
-	DeploymentKey string      `json:"deploymentKey"`
-	InstanceID    string      `json:"instanceId"`
-	ContainerID   string      `json:"containerId"`
-	ContainerName string      `json:"containerName"`
-	Status        AgentStatus `json:"status"`
-	HostPort      int         `json:"hostPort"`
-	CreatedAt     string      `json:"createdAt"`
-	YamlPath      string      `json:"yamlPath"`
-	SessionDir    string      `json:"sessionDir"`
-	SkillsDir     string      `json:"skillsDir,omitempty"`
+	AgentName     naming.RootAgentID   `json:"agentName"`
+	DeploymentKey naming.DeploymentKey `json:"deploymentKey"`
+	InstanceID    string               `json:"instanceId"`
+	ContainerID   string               `json:"containerId"`
+	ContainerName string               `json:"containerName"`
+	Status        AgentStatus          `json:"status"`
+	HostPort      int                  `json:"hostPort"`
+	CreatedAt     string               `json:"createdAt"`
+	YamlPath      string               `json:"yamlPath"`
+	SessionDir    string               `json:"sessionDir"`
+	SkillsDir     string               `json:"skillsDir,omitempty"`
 	// ContainerSkillsDir is the in-container root of per-agent skill
 	// directories; populated only when the graph declares skills.
 	ContainerSkillsDir string `json:"containerSkillsDir,omitempty"`
@@ -431,14 +433,14 @@ type SuccessResponse struct {
 // AgentStatusResponse is the lightweight status payload for GET /agents/:name/status.
 // Clients poll this after Create to detect when the runtime is healthy.
 type AgentStatusResponse struct {
-	AgentName     string `json:"agentName"` // bare runtime root agent id; "" on pre-split containers
-	DeploymentKey string `json:"deploymentKey"`
-	ContainerName string `json:"containerName"`
-	ContainerID   string `json:"containerId"`
-	Status        string `json:"status"` // Docker state: running, exited, created, etc.
-	Health        string `json:"health"` // Docker health: starting, healthy, unhealthy, none
-	HostPort      int    `json:"hostPort"`
-	Image         string `json:"image"`
+	AgentName     naming.RootAgentID   `json:"agentName"` // bare runtime root agent id; "" on pre-split containers
+	DeploymentKey naming.DeploymentKey `json:"deploymentKey"`
+	ContainerName string               `json:"containerName"`
+	ContainerID   string               `json:"containerId"`
+	Status        string               `json:"status"` // Docker state: running, exited, created, etc.
+	Health        string               `json:"health"` // Docker health: starting, healthy, unhealthy, none
+	HostPort      int                  `json:"hostPort"`
+	Image         string               `json:"image"`
 }
 
 // ValidateCreateRequest validates a CreateAgentRequest at the package level.
@@ -459,7 +461,7 @@ func (r *CreateAgentRequest) Validate() error {
 	if r.RootAgentID == "" {
 		return fmt.Errorf("rootAgentId is required")
 	}
-	if !artifactNamePattern.MatchString(r.RootAgentID) {
+	if !artifactNamePattern.MatchString(string(r.RootAgentID)) {
 		return fmt.Errorf("rootAgentId %q must contain only letters, digits, dots, underscores, or hyphens", r.RootAgentID)
 	}
 	// Deployment resource identity (issue #18): the deployment key alone keys
@@ -470,7 +472,7 @@ func (r *CreateAgentRequest) Validate() error {
 	if r.DeploymentKey == "" {
 		return fmt.Errorf("deploymentKey is required")
 	}
-	if !artifactNamePattern.MatchString(r.DeploymentKey) {
+	if !artifactNamePattern.MatchString(string(r.DeploymentKey)) {
 		return fmt.Errorf("deploymentKey %q must contain only letters, digits, dots, underscores, or hyphens", r.DeploymentKey)
 	}
 	if naming.SanitizeName(r.DeploymentKey) != r.DeploymentKey {
@@ -512,7 +514,7 @@ func (r *CreateAgentRequest) Validate() error {
 		}
 	}
 
-	root, ok := r.AgentByID(r.RootAgentID)
+	root, ok := r.AgentByID(string(r.RootAgentID))
 	if !ok {
 		return fmt.Errorf("rootAgentId %q not found in agents", r.RootAgentID)
 	}
@@ -528,7 +530,7 @@ func (r *CreateAgentRequest) Validate() error {
 	}
 	for i := range r.Agents {
 		a := &r.Agents[i]
-		if a.Name == r.RootAgentID {
+		if a.Name == string(r.RootAgentID) {
 			continue
 		}
 		if a.Model != "" {
