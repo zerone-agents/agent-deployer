@@ -39,7 +39,7 @@ func TestWriteAgentYAML_Runtime20Format(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -102,7 +102,7 @@ func TestReadAgentYAML_Runtime20RoundTrip(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	graph, err := store.ReadAgentYAML("coder")
 	require.NoError(t, err)
@@ -187,7 +187,7 @@ func TestWriteAndReadAgentYAML(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	// Verify file is created at the correct path.
@@ -250,7 +250,7 @@ func TestWriteAgentYAML_ContainsExpectedKeys(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -312,7 +312,7 @@ func TestWriteAgentYAML_NilMaxTurnsOmitted(t *testing.T) {
 		MaxTurns:     nil,
 	}
 
-	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -341,7 +341,7 @@ func TestWriteAgentYAML_EmptyName(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewAgentStorage(tmpDir)
 
-	err := store.WriteAgentYAML("", nil, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("", "", nil, model.ProviderConfig{}, nil, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must be a single path segment")
 }
@@ -353,7 +353,7 @@ func TestWriteAgentYAML_PathTraversalRejected(t *testing.T) {
 	cases := []string{"../etc", "a/b", "/abs", ".", ".."}
 	for _, bad := range cases {
 		agent := model.AgentDefinition{Name: bad, Model: "m", SystemPrompt: "p"}
-		err := store.WriteAgentYAML(bad, []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
+		err := store.WriteAgentYAML(bad, bad, []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 		require.Error(t, err, "name %q should be rejected", bad)
 		assert.Contains(t, err.Error(), "must be a single path segment")
 	}
@@ -387,7 +387,7 @@ func TestReadAgentYAML_SubagentsPreserveDefinitionOrder(t *testing.T) {
 		{Name: "mid", Description: "m desc"},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("orchestrator", agents, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("orchestrator", "orchestrator", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	graph, err := store.ReadAgentYAML("orchestrator")
 	require.NoError(t, err)
@@ -472,7 +472,7 @@ func TestWriteAndReadAgentYAML_WithMcpServers(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	graph, err := store.ReadAgentYAML("coder")
@@ -506,7 +506,7 @@ func TestWriteAgentYAML_McpServersUsesTransportField(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -536,7 +536,7 @@ func TestWriteAndReadAgentYAML_McpServersEmptyOmitted(t *testing.T) {
 		SystemPrompt: "You are a coding assistant.",
 	}
 
-	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -568,7 +568,7 @@ func TestWriteAgentYAML_SettingSourcesDefaultsToProject(t *testing.T) {
 		SettingSources: nil, // explicitly nil
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -592,7 +592,7 @@ func TestWriteAgentYAML_SettingSourcesEmptySliceDefaultsToProject(t *testing.T) 
 		SettingSources: []string{}, // explicitly empty
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -616,7 +616,7 @@ func TestWriteAgentYAML_SettingSourcesPassthrough(t *testing.T) {
 		SettingSources: []string{"user", "project"},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -639,7 +639,7 @@ func TestWriteAgentYAML_DatasetsOmittedWhenEmpty(t *testing.T) {
 		Datasets:     map[string]string{},
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -673,7 +673,7 @@ func TestWriteAgentYAML_ContainsMaxSessionQueries(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -706,7 +706,7 @@ func TestWriteAgentYAML_NilMaxSessionQueriesOmitted(t *testing.T) {
 		MaxSessionQueries: nil,
 	}
 
-	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -742,7 +742,7 @@ func TestReadAgentYAML_MaxSessionQueries(t *testing.T) {
 		},
 	}
 
-	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil)
 	require.NoError(t, err)
 
 	graph, err := store.ReadAgentYAML("coder")
@@ -774,7 +774,7 @@ func TestWriteAgentYAML_WithAigc(t *testing.T) {
 		// ExplicitHint 未传：应物化为 true
 	}
 
-	err := store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
@@ -810,7 +810,7 @@ func TestWriteAgentYAML_AigcExplicitHintFalsePreserved(t *testing.T) {
 		ExplicitHint:    &explicitFalse,
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -836,7 +836,7 @@ func TestWriteAgentYAML_NoAigcSectionWhenNilOrDisabled(t *testing.T) {
 				Model:        "glm-4.5",
 				SystemPrompt: "You are a coding assistant.",
 			}
-			require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil))
+			require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, nil, nil))
 
 			data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 			require.NoError(t, err)
@@ -865,7 +865,7 @@ func TestWriteAgentYAML_ProviderCredentialsOnMainEntryOnly(t *testing.T) {
 		APIKey:   "sk-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", agents, provider, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -903,7 +903,7 @@ func TestWriteAgentYAML_CredentialFieldOrder(t *testing.T) {
 		APIKey:   "sk-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, provider, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -939,7 +939,7 @@ func TestWriteAgentYAML_WithHub(t *testing.T) {
 		Org:         "tenant-a",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -969,7 +969,7 @@ func TestWriteAgentYAML_HubOrgOmittedWhenEmpty(t *testing.T) {
 		ChatPushKey: "push-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -991,7 +991,7 @@ func TestWriteAgentYAML_NoHubSectionWhenNilOrDisabled(t *testing.T) {
 				Model:        "glm-4.5",
 				SystemPrompt: "You are a coding assistant.",
 			}
-			require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
+			require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, nil, hub, nil))
 
 			data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 			require.NoError(t, err)
@@ -1020,7 +1020,7 @@ func TestWriteAgentYAML_HubAndAigcCoexist(t *testing.T) {
 		ChatPushKey: "push-secret",
 	}
 
-	require.NoError(t, store.WriteAgentYAML("coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, hub, nil))
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, model.ProviderConfig{}, aigc, hub, nil))
 
 	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -1041,7 +1041,7 @@ func TestWriteAgentYAML_CustomTools(t *testing.T) {
 	}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-x"}
 
-	err := s.WriteAgentYAML("coder", []model.AgentDefinition{agent}, provider, nil, nil, map[string][]string{
+	err := s.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, provider, nil, nil, map[string][]string{
 		"coder": {"./tools/Zebra.mjs", "./tools/Alpha.ts"},
 	})
 	require.NoError(t, err)
@@ -1071,7 +1071,7 @@ func TestWriteAgentYAML_CustomTools_OmittedWhenEmpty(t *testing.T) {
 	agent := model.AgentDefinition{Name: "coder", Description: "d", Model: "m", SystemPrompt: "s"}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-x"}
 
-	require.NoError(t, s.WriteAgentYAML("coder", []model.AgentDefinition{agent}, provider, nil, nil, nil))
+	require.NoError(t, s.WriteAgentYAML("coder", "coder", []model.AgentDefinition{agent}, provider, nil, nil, nil))
 
 	data, err := os.ReadFile(filepath.Join(dir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -1089,7 +1089,7 @@ func TestWriteAgentYAML_CustomTools_DoesNotTouchSubagentEntries(t *testing.T) {
 	}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-x"}
 
-	require.NoError(t, s.WriteAgentYAML("coder", agents, provider, nil, nil, map[string][]string{"coder": {"./tools/A.mjs"}}))
+	require.NoError(t, s.WriteAgentYAML("coder", "coder", agents, provider, nil, nil, map[string][]string{"coder": {"./tools/A.mjs"}}))
 
 	data, err := os.ReadFile(filepath.Join(dir, "coder", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -1131,7 +1131,7 @@ func TestWriteAgentYAML_CompleteGraph(t *testing.T) {
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-root"}
 	toolPaths := map[string][]string{"child-a": {"./tools/child-a-tool.mjs"}}
 
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, toolPaths))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, toolPaths))
 
 	data, err := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
 	require.NoError(t, err)
@@ -1204,7 +1204,7 @@ func TestReadAgentYAML_CompleteGraphRoundTrip(t *testing.T) {
 		},
 	}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-root"}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, nil))
 
 	graph, err := store.ReadAgentYAML("parent")
 	require.NoError(t, err)
@@ -1237,7 +1237,7 @@ func TestWriteAgentYAML_RejectsNameMismatch(t *testing.T) {
 	dir := t.TempDir()
 	store := NewAgentStorage(dir)
 	agents := []model.AgentDefinition{{Name: "other", Description: "x", Model: "m"}}
-	err := store.WriteAgentYAML("coder", agents, model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no agent with id")
 }
@@ -1272,7 +1272,7 @@ func TestReadAgentYAML_ManifestRestoresArtifactMetadata(t *testing.T) {
 	}
 	provider := model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://api.anthropic.com", APIKey: "sk-root"}
 
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil,
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil,
 		map[string][]string{"parent": {"./tools/root-tool.mjs"}, "child-a": {"./tools/child-tool.mjs"}}))
 
 	// The embedded section lives in agents.yaml; no sidecar is written.
@@ -1356,7 +1356,7 @@ func TestWriteAgentYAML_ArtifactFreeRedeployDropsEmbeddedSection(t *testing.T) {
 			CustomTools: []model.ToolSource{{Name: "old-tool", URL: "https://example.com/o.mjs", Hash: strings.Repeat("b", 64), FileName: "o.mjs"}},
 		},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", withArtifacts, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", withArtifacts, provider, nil, nil, nil))
 
 	// Plant a legacy sidecar to prove it is migrated away on redeploy.
 	agentDir := filepath.Join(dir, "parent", "agents")
@@ -1366,7 +1366,7 @@ func TestWriteAgentYAML_ArtifactFreeRedeployDropsEmbeddedSection(t *testing.T) {
 		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2", Subagents: []string{"child-a"}},
 		{Name: "child-a", Description: "c2"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", withoutArtifacts, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", withoutArtifacts, provider, nil, nil, nil))
 
 	yamlBytes, err := os.ReadFile(filepath.Join(agentDir, "agents.yaml"))
 	require.NoError(t, err)
@@ -1393,14 +1393,14 @@ func TestWriteAgentYAML_RedeployReplacesEmbeddedDeclarations(t *testing.T) {
 		{Name: "child-a", Description: "c", SettingSources: []string{"user"},
 			Skills: []model.SkillSource{{Name: "skill-one", URL: "https://example.com/1.zip", Hash: strings.Repeat("a", 64)}}},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", first, provider, nil, nil, nil))
 
 	second := []model.AgentDefinition{
 		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "s2"},
 		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
 			Skills: []model.SkillSource{{Name: "skill-two", URL: "https://example.com/2.zip", Hash: strings.Repeat("c", 64)}}},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", second, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", second, provider, nil, nil, nil))
 
 	graph, err := store.ReadAgentYAML("parent")
 	require.NoError(t, err)
@@ -1431,7 +1431,7 @@ func TestWriteAgentYAML_StageFailurePreservesPreviousDeployment(t *testing.T) {
 		{Name: "child-a", Description: "c", SettingSources: []string{"user"},
 			Skills: []model.SkillSource{{Name: "skill-one", URL: "https://example.com/1.zip", Hash: strings.Repeat("a", 64)}}},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", first, provider, nil, nil, nil))
 
 	// Squat the staging path: the second write fails BEFORE agents.yaml is
 	// touched — there is no separate manifest file to get out of sync.
@@ -1442,7 +1442,7 @@ func TestWriteAgentYAML_StageFailurePreservesPreviousDeployment(t *testing.T) {
 		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
 			Skills: []model.SkillSource{{Name: "skill-two", URL: "https://example.com/2.zip", Hash: strings.Repeat("c", 64)}}},
 	}
-	err := store.WriteAgentYAML("parent", second, provider, nil, nil, nil)
+	err := store.WriteAgentYAML("parent", "parent", second, provider, nil, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent YAML")
 
@@ -1530,7 +1530,7 @@ func TestWriteAgentYAML_LegacySidecarNotRemovedBeforeYAMLCommit(t *testing.T) {
 		{Name: "child-a", Description: "c2", SettingSources: []string{"user"},
 			Skills: []model.SkillSource{{Name: "new-skill", URL: "https://example.com/n.zip", Hash: strings.Repeat("c", 64)}}},
 	}
-	err = store.WriteAgentYAML("parent", agents,
+	err = store.WriteAgentYAML("parent", "parent", agents,
 		model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
 	require.Error(t, err)
 
@@ -1576,7 +1576,7 @@ func TestWriteAgentYAML_LegacySidecarCleanupFailureIsDeferred(t *testing.T) {
 			Skills: []model.SkillSource{{Name: "new-skill", URL: "https://example.com/n.zip", Hash: strings.Repeat("c", 64)}}},
 	}
 	// The deployment SUCCEEDS despite the undeletable residue.
-	err := store.WriteAgentYAML("parent", agents,
+	err := store.WriteAgentYAML("parent", "parent", agents,
 		model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil)
 	require.NoError(t, err, "post-commit cleanup failure must not fail the deployment")
 
@@ -1609,7 +1609,7 @@ func TestWriteAgentYAML_SystemPromptExternalized(t *testing.T) {
 		{Name: "child-a", Description: "c", SystemPrompt: "You are the child agent."},
 		{Name: "child-b", Description: "empty"}, // no prompt
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	agentDir := filepath.Join(dir, "parent", "agents")
 	yamlBytes, err := os.ReadFile(filepath.Join(agentDir, "agents.yaml"))
@@ -1655,7 +1655,7 @@ func TestReadAgentYAML_SystemPromptRoundTrip(t *testing.T) {
 		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "Long parent prompt", Subagents: []string{"child-a"}},
 		{Name: "child-a", Description: "c", SystemPrompt: "Long child prompt"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	graph, err := store.ReadAgentYAML("parent")
 	require.NoError(t, err)
@@ -1675,7 +1675,7 @@ func TestWriteAgentYAML_PromptStageFailurePreservesDeployment(t *testing.T) {
 	first := []model.AgentDefinition{
 		{Name: "parent", Description: "first", Model: "m", SystemPrompt: "Old prompt"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", first, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", first, model.ProviderConfig{}, nil, nil, nil))
 	agentDir := filepath.Join(dir, "parent", "agents")
 
 	// Make prompt staging fail: replace the prompts directory with a file.
@@ -1685,7 +1685,7 @@ func TestWriteAgentYAML_PromptStageFailurePreservesDeployment(t *testing.T) {
 	second := []model.AgentDefinition{
 		{Name: "parent", Description: "second", Model: "m", SystemPrompt: "New prompt"},
 	}
-	err := store.WriteAgentYAML("parent", second, model.ProviderConfig{}, nil, nil, nil)
+	err := store.WriteAgentYAML("parent", "parent", second, model.ProviderConfig{}, nil, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prompts")
 
@@ -1725,7 +1725,7 @@ func TestWriteAgentYAML_PromptRewriteAndSkip(t *testing.T) {
 	agents := []model.AgentDefinition{
 		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "The prompt text"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, nil))
 	promptsDir := filepath.Join(dir, "parent", "agents", "prompts")
 	entries, err := os.ReadDir(promptsDir)
 	require.NoError(t, err)
@@ -1735,7 +1735,7 @@ func TestWriteAgentYAML_PromptRewriteAndSkip(t *testing.T) {
 	// Corrupt the live file, then redeploy the same graph: the file must be
 	// repaired (content mismatch → rewrite via temp+rename).
 	require.NoError(t, os.WriteFile(promptPath, []byte("corrupted"), 0644))
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, nil))
 	content, err := os.ReadFile(promptPath)
 	require.NoError(t, err)
 	assert.Equal(t, "The prompt text", string(content), "mismatched live prompt must be repaired")
@@ -1743,7 +1743,7 @@ func TestWriteAgentYAML_PromptRewriteAndSkip(t *testing.T) {
 	// Matching content → skipped: mtime must not change.
 	before, err := os.Stat(promptPath)
 	require.NoError(t, err)
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, nil))
 	after, err := os.Stat(promptPath)
 	require.NoError(t, err)
 	assert.Equal(t, before.ModTime(), after.ModTime(), "matching prompt file must not be rewritten")
@@ -1779,7 +1779,7 @@ func TestWriteAgentYAML_PromptGCReclaimsSupersededGenerations(t *testing.T) {
 	first := []model.AgentDefinition{
 		{Name: "parent", Description: "d1", Model: "m", SystemPrompt: "version one"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", first, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", first, provider, nil, nil, nil))
 	entries, err := os.ReadDir(promptsDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
@@ -1788,14 +1788,14 @@ func TestWriteAgentYAML_PromptGCReclaimsSupersededGenerations(t *testing.T) {
 	second := []model.AgentDefinition{
 		{Name: "parent", Description: "d2", Model: "m", SystemPrompt: "version two"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", second, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", second, provider, nil, nil, nil))
 	entries, err = os.ReadDir(promptsDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "superseded prompt generation must be reclaimed")
 	assert.NotEqual(t, firstPrompt, entries[0].Name())
 
 	third := []model.AgentDefinition{{Name: "parent", Description: "d3", Model: "m"}}
-	require.NoError(t, store.WriteAgentYAML("parent", third, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", third, provider, nil, nil, nil))
 	entries, err = os.ReadDir(promptsDir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "prompts removed from the graph must be reclaimed")
@@ -1815,7 +1815,7 @@ func TestWriteAgentYAML_PromptStagingSymlinkCannotEscape(t *testing.T) {
 	agents := []model.AgentDefinition{
 		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "The prompt"},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, nil))
 	promptsDir := filepath.Join(dir, "parent", "agents", "prompts")
 	entries, err := os.ReadDir(promptsDir)
 	require.NoError(t, err)
@@ -1828,7 +1828,7 @@ func TestWriteAgentYAML_PromptStagingSymlinkCannotEscape(t *testing.T) {
 	symPath := filepath.Join(promptsDir, finalName+".tmp")
 	require.NoError(t, os.Symlink(victim, symPath))
 
-	require.NoError(t, store.WriteAgentYAML("parent", agents, provider, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, provider, nil, nil, nil))
 
 	content, rerr := os.ReadFile(filepath.Join(promptsDir, finalName))
 	require.NoError(t, rerr)
@@ -1850,7 +1850,7 @@ func TestListAgentDirs_AcceptsDotSkillsNames(t *testing.T) {
 	store := NewAgentStorage(dir)
 
 	for _, id := range []string{"alpha", ".skills-prod", "beta"} {
-		require.NoError(t, store.WriteAgentYAML(id, []model.AgentDefinition{
+		require.NoError(t, store.WriteAgentYAML(id, id, []model.AgentDefinition{
 			{Name: id, Description: "d", Model: "m", SystemPrompt: "p"},
 		}, model.ProviderConfig{}, nil, nil, nil))
 	}
@@ -1891,10 +1891,84 @@ func TestWriteAgentYAML_MaxSessionQueriesNeverWrittenAsLegacyKey(t *testing.T) {
 	agents := []model.AgentDefinition{
 		{Name: "parent", Description: "d", Model: "m", SystemPrompt: "p", MaxSessionQueries: &queries},
 	}
-	require.NoError(t, store.WriteAgentYAML("parent", agents, model.ProviderConfig{}, nil, nil, nil))
+	require.NoError(t, store.WriteAgentYAML("parent", "parent", agents, model.ProviderConfig{}, nil, nil, nil))
 
 	yamlBytes, err := os.ReadFile(filepath.Join(dir, "parent", "agents", "agents.yaml"))
 	require.NoError(t, err)
 	assert.Contains(t, string(yamlBytes), "maxSessionQueries: 50")
 	assert.NotContains(t, string(yamlBytes), "maxSessionTurns", "new writes must use the renamed key only")
+}
+
+// TestWriteReadAgentYAML_DeploymentKeySplitFromRootID is the issue #18 core:
+// a tenant-scoped deployment key must never leak into the runtime agent ids.
+// The storage dir is keyed by the deployment key while agents.yaml carries
+// only the bare runtime ids plus the deployer-private root marker.
+func TestWriteReadAgentYAML_DeploymentKeySplitFromRootID(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	agents := []model.AgentDefinition{
+		{Name: "assistant", Description: "d", Model: "m", SystemPrompt: "p"},
+	}
+	require.NoError(t, store.WriteAgentYAML("acme-assistant", "assistant", agents,
+		model.ProviderConfig{Protocol: "anthropic-messages", BaseURL: "https://x", APIKey: "k"}, nil, nil, nil))
+
+	// File lives under the deployment key.
+	yamlBytes, err := os.ReadFile(filepath.Join(dir, "acme-assistant", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	text := string(yamlBytes)
+	assert.Contains(t, text, "x-deployer-root-agent-id: assistant",
+		"agents.yaml must carry the deployer-private root marker")
+	assert.Contains(t, text, "id: assistant")
+	assert.NotContains(t, text, "acme-assistant",
+		"the deployment key must never leak into agents.yaml")
+
+	graph, err := store.ReadAgentYAML("acme-assistant")
+	require.NoError(t, err)
+	assert.Equal(t, "assistant", graph.RootAgentID,
+		"read-back must resolve the root via the marker, not the dir name")
+	require.Len(t, graph.Agents, 1)
+	assert.Equal(t, "assistant", graph.Agents[0].Name)
+}
+
+// TestReadAgentYAML_MarkerEntryMismatchFails: a root marker naming an entry
+// that does not exist in the document is corruption, not something to paper
+// over with a silent fallback.
+func TestReadAgentYAML_MarkerEntryMismatchFails(t *testing.T) {
+	dir := t.TempDir()
+	agentDir := filepath.Join(dir, "broken", "agents")
+	require.NoError(t, os.MkdirAll(agentDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agents.yaml"), []byte(
+		"x-deployer-root-agent-id: assistant\nagents:\n  - id: coder\n    description: d\n"), 0644))
+
+	_, err := NewAgentStorage(dir).ReadAgentYAML("broken")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no agent entry with id "assistant"`)
+}
+
+// TestWriteAgentYAML_ScopedKeyRedeployWithBareRoot is issue #18 acceptance
+// #6: an existing scoped deployment is redeployed under the SAME key; only
+// the runtime ids inside agents.yaml become bare.
+func TestWriteAgentYAML_ScopedKeyRedeployWithBareRoot(t *testing.T) {
+	dir := t.TempDir()
+	store := NewAgentStorage(dir)
+	scoped := []model.AgentDefinition{
+		{Name: "acme-assistant", Description: "d", Model: "m", SystemPrompt: "p"},
+	}
+	require.NoError(t, store.WriteAgentYAML("acme-assistant", "acme-assistant", scoped, model.ProviderConfig{}, nil, nil, nil))
+
+	bare := []model.AgentDefinition{
+		{Name: "assistant", Description: "d", Model: "m", SystemPrompt: "p"},
+	}
+	require.NoError(t, store.WriteAgentYAML("acme-assistant", "assistant", bare, model.ProviderConfig{}, nil, nil, nil))
+
+	graph, err := store.ReadAgentYAML("acme-assistant")
+	require.NoError(t, err)
+	assert.Equal(t, "assistant", graph.RootAgentID)
+	require.Len(t, graph.Agents, 1)
+	assert.Equal(t, "assistant", graph.Agents[0].Name,
+		"the redeploy must fully replace the scoped root with the bare one")
+
+	yamlBytes, err := os.ReadFile(filepath.Join(dir, "acme-assistant", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(yamlBytes), "id: acme-assistant")
 }

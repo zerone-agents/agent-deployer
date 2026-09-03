@@ -41,8 +41,8 @@ func newFakeDockerForHandler() *fakeDockerForHandler {
 	}
 }
 
-func (f *fakeDockerForHandler) FindAgentContainer(_ context.Context, agentName string) (*docker.RuntimeContainer, error) {
-	c, ok := f.containers[agentName]
+func (f *fakeDockerForHandler) FindAgentContainer(_ context.Context, deploymentKey string) (*docker.RuntimeContainer, error) {
+	c, ok := f.containers[deploymentKey]
 	if !ok {
 		return nil, nil
 	}
@@ -61,15 +61,16 @@ func (f *fakeDockerForHandler) CreateAgentContainer(_ context.Context, opts dock
 	port := f.nextPort
 	f.nextPort++
 	c := &docker.RuntimeContainer{
-		ID:         "cid-" + opts.AgentName,
-		Name:       opts.ContainerName,
-		AgentName:  opts.AgentName,
-		InstanceID: opts.InstanceID,
-		Status:     "running",
-		HostPort:   port,
-		Image:      opts.Image,
+		ID:            "cid-" + opts.DeploymentKey,
+		Name:          opts.ContainerName,
+		DeploymentKey: opts.DeploymentKey,
+		RootAgentID:   opts.RootAgentID,
+		InstanceID:    opts.InstanceID,
+		Status:        "running",
+		HostPort:      port,
+		Image:         opts.Image,
 	}
-	f.containers[opts.AgentName] = c
+	f.containers[opts.DeploymentKey] = c
 	f.tokens[c.ID] = opts.RuntimeToken
 	return c.ID, port, nil
 }
@@ -151,7 +152,8 @@ func setupTestRouterWithImage(t *testing.T, image string, assumeLatest bool) (*g
 // validRequestBody returns a JSON body for a valid create-agent request.
 func validRequestBody() []byte {
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -222,7 +224,8 @@ func TestCreateAgent_AcceptsRuntimeToken(t *testing.T) {
 	r, _, fakeDC := setupTestRouter(t)
 
 	req := model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -365,15 +368,18 @@ func TestListAgents_IncludeArchived(t *testing.T) {
 	var archivedList struct {
 		Success bool `json:"success"`
 		Data    []struct {
-			AgentName string `json:"agentName"`
-			Status    string `json:"status"`
+			AgentName     string `json:"agentName"`
+			DeploymentKey string `json:"deploymentKey"`
+			Status        string `json:"status"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &archivedList); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	require.Len(t, archivedList.Data, 1, "includeArchived must show the archived agent")
-	assert.Equal(t, "coder", archivedList.Data[0].AgentName)
+	// Archived entries are keyed by deployment key alone (issue #18).
+	assert.Empty(t, archivedList.Data[0].AgentName)
+	assert.Equal(t, "coder", archivedList.Data[0].DeploymentKey)
 	assert.Equal(t, string(model.StatusArchived), archivedList.Data[0].Status)
 }
 
@@ -433,7 +439,8 @@ func TestCreateAgent_400_MissingFields(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	// Valid JSON, but missing required model field.
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -521,8 +528,9 @@ func TestGetAgent_Archived(t *testing.T) {
 	var resp struct {
 		Success bool `json:"success"`
 		Data    struct {
-			AgentName string `json:"agentName"`
-			Status    string `json:"status"`
+			AgentName     string `json:"agentName"`
+			DeploymentKey string `json:"deploymentKey"`
+			Status        string `json:"status"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -531,8 +539,13 @@ func TestGetAgent_Archived(t *testing.T) {
 	if !resp.Success {
 		t.Errorf("success = false, want true")
 	}
-	if resp.Data.AgentName != "coder" {
-		t.Errorf("data.agentName = %q, want %q", resp.Data.AgentName, "coder")
+	// Archived entries are keyed by deployment key alone (issue #18): the
+	// bare root agent id is not recovered from disk here.
+	if resp.Data.AgentName != "" {
+		t.Errorf("data.agentName = %q, want empty (archived entries carry no root id)", resp.Data.AgentName)
+	}
+	if resp.Data.DeploymentKey != "coder" {
+		t.Errorf("data.deploymentKey = %q, want %q", resp.Data.DeploymentKey, "coder")
 	}
 	if resp.Data.Status != string(model.StatusArchived) {
 		t.Errorf("data.status = %q, want %q", resp.Data.Status, model.StatusArchived)
@@ -659,7 +672,8 @@ func TestAgentHandler_Create_SkillHashMismatch_Returns422(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:           "coder",
@@ -714,7 +728,8 @@ func TestAgentHandler_Create_SkillDownloadFailed_Returns502(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:           "coder",
@@ -765,7 +780,8 @@ func TestAgentHandler_Create_ToolHashMismatch_Returns422(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -819,7 +835,8 @@ func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
 
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -859,7 +876,8 @@ func TestAgentHandler_Create_ToolDownloadFailure_Returns502(t *testing.T) {
 func TestCreateAgent_400_InvalidAigc(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -925,7 +943,8 @@ func TestCreateAgent_RuntimeIncompatibleReturns503(t *testing.T) {
 func TestCreateAgent_DisallowedToolsRoundTripsToYAML(t *testing.T) {
 	r, svc, _ := setupTestRouter(t)
 	body, _ := json.Marshal(model.CreateAgentRequest{
-		RootAgentID: "parent",
+		RootAgentID:   "parent",
+		DeploymentKey: "parent",
 		Agents: []model.AgentDefinition{
 			{
 				Name: "parent", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "s",
@@ -988,7 +1007,8 @@ func TestCreateAgent_400_LegacyMaxSessionTurns(t *testing.T) {
 func TestCreateAgent_AcceptsMaxSessionQueries(t *testing.T) {
 	r, _, _ := setupTestRouter(t)
 	body, err := json.Marshal(map[string]any{
-		"rootAgentId": "coder",
+		"rootAgentId":   "coder",
+		"deploymentKey": "coder",
 		"agents": []map[string]any{
 			{"name": "coder", "description": "d", "model": "m", "systemPrompt": "p", "maxSessionQueries": 50},
 		},
@@ -999,4 +1019,80 @@ func TestCreateAgent_AcceptsMaxSessionQueries(t *testing.T) {
 
 	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
 	assert.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+}
+
+// TestCreateAgent_DeploymentKeyCarriedInResponse pins the issue #18 wire
+// contract at the HTTP layer: a tenant-scoped deployment key and a bare
+// rootAgentId both flow through Create, the response echoes both identities,
+// and the container name derives from the deployment key.
+func TestCreateAgent_DeploymentKeyCarriedInResponse(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body, err := json.Marshal(model.CreateAgentRequest{
+		RootAgentID:   "coder",
+		DeploymentKey: "acme-coder",
+		Agents: []model.AgentDefinition{
+			{
+				Name:         "coder",
+				Description:  "Writes and edits code",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "You are a coding assistant.",
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-test",
+		},
+		RuntimeToken: "test-runtime-token",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			AgentName     string `json:"agentName"`
+			DeploymentKey string `json:"deploymentKey"`
+			ContainerName string `json:"containerName"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp.Success)
+	assert.Equal(t, "coder", resp.Data.AgentName,
+		"agentName is the bare runtime root id")
+	assert.Equal(t, "acme-coder", resp.Data.DeploymentKey,
+		"deploymentKey is the tenant-scoped infra key")
+	assert.Contains(t, resp.Data.ContainerName, "cloud-agent-acme-coder-",
+		"container name derives from the deployment key")
+
+	// Lifecycle lookups are keyed by the deployment key.
+	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/acme-coder", nil)
+	assert.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/coder", nil)
+	assert.Equal(t, http.StatusNotFound, w.Code,
+		"the bare root id is not a lookup key; only the deployment key is")
+}
+
+// TestCreateAgent_MissingDeploymentKey_Rejected400 pins the issue #18
+// compatibility boundary: a pre-split client that does not send
+// deploymentKey gets an explicit validation error — never a silent fallback
+// to rootAgentId (which would reintroduce cross-tenant same-name collisions).
+func TestCreateAgent_MissingDeploymentKey_Rejected400(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	body, err := json.Marshal(map[string]any{
+		"rootAgentId": "coder",
+		"agents": []map[string]any{
+			{"name": "coder", "description": "d", "model": "m", "systemPrompt": "p"},
+		},
+		"provider":      map[string]any{"protocol": "anthropic-messages", "baseUrl": "https://x", "lockedApiKey": "k"},
+		"runtime_token": "t",
+	})
+	require.NoError(t, err)
+
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "deploymentKey is required",
+		"the 400 must name the missing field so pre-split clients can migrate")
 }

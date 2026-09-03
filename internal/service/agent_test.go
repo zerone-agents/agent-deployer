@@ -35,11 +35,11 @@ type fakeDockerClient struct {
 	findErr    error
 }
 
-func (f *fakeDockerClient) FindAgentContainer(ctx context.Context, agentName string) (*docker.RuntimeContainer, error) {
+func (f *fakeDockerClient) FindAgentContainer(ctx context.Context, deploymentKey string) (*docker.RuntimeContainer, error) {
 	if f.findErr != nil {
 		return nil, f.findErr
 	}
-	if f.existing != nil && f.existing.AgentName != "" && f.existing.AgentName != agentName {
+	if f.existing != nil && f.existing.DeploymentKey != "" && f.existing.DeploymentKey != deploymentKey {
 		return nil, nil
 	}
 	return f.existing, nil
@@ -88,7 +88,8 @@ func (f *fakeDockerClient) ContainerLogs(_ context.Context, id string, tail int)
 // validRequest returns a CreateAgentRequest with all required fields populated.
 func validRequest() *model.CreateAgentRequest {
 	return &model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "coder",
@@ -185,8 +186,8 @@ func TestAgentService_Create_NewAgent(t *testing.T) {
 		t.Fatalf("CreateAgentContainer was not called")
 	}
 	opts := fake.created
-	if opts.AgentName != "coder" {
-		t.Errorf("opts.AgentName = %q, want %q", opts.AgentName, "coder")
+	if opts.DeploymentKey != "coder" {
+		t.Errorf("opts.DeploymentKey = %q, want %q", opts.DeploymentKey, "coder")
 	}
 	if opts.Image != "open-agent-runtime:latest" {
 		t.Errorf("opts.Image = %q, want %q", opts.Image, "open-agent-runtime:latest")
@@ -219,12 +220,13 @@ func TestAgentService_Create_NewAgent(t *testing.T) {
 
 func TestAgentService_Create_ExistingWithoutForce(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:         "existing-id",
-		Name:       "cloud-agent-coder-oldid",
-		AgentName:  "coder",
-		InstanceID: "oldid",
-		Status:     "running",
-		HostPort:   30000,
+		ID:            "existing-id",
+		Name:          "cloud-agent-coder-oldid",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		InstanceID:    "oldid",
+		Status:        "running",
+		HostPort:      30000,
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, _ := newTestService(t, fake)
@@ -254,12 +256,13 @@ func TestAgentService_Create_ExistingWithoutForce(t *testing.T) {
 
 func TestAgentService_Create_ExistingWithForce(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:         "existing-id",
-		Name:       "cloud-agent-coder-oldid",
-		AgentName:  "coder",
-		InstanceID: "oldid",
-		Status:     "running",
-		HostPort:   30000,
+		ID:            "existing-id",
+		Name:          "cloud-agent-coder-oldid",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		InstanceID:    "oldid",
+		Status:        "running",
+		HostPort:      30000,
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, _ := newTestService(t, fake)
@@ -312,7 +315,8 @@ func TestAgentService_Create_InvalidRequest(t *testing.T) {
 
 	// Missing required Name on the root agent definition.
 	req := &model.CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []model.AgentDefinition{
 			{
 				Name:         "",
@@ -356,13 +360,14 @@ func TestAgentService_Create_MissingRuntimeToken(t *testing.T) {
 
 func TestAgentService_Get_Found(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:         "id-abc",
-		Name:       "cloud-agent-coder-xyz",
-		AgentName:  "coder",
-		InstanceID: "xyz",
-		Status:     "running",
-		HostPort:   32100,
-		CreatedAt:  "2026-06-25T10:00:00Z",
+		ID:            "id-abc",
+		Name:          "cloud-agent-coder-xyz",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		InstanceID:    "xyz",
+		Status:        "running",
+		HostPort:      32100,
+		CreatedAt:     "2026-06-25T10:00:00Z",
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, dataDir := newTestService(t, fake)
@@ -411,9 +416,10 @@ func TestAgentService_Get_NotFound(t *testing.T) {
 
 func TestAgentService_Stop(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:        "id-stop",
-		AgentName: "coder",
-		Status:    "running",
+		ID:            "id-stop",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		Status:        "running",
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, _ := newTestService(t, fake)
@@ -428,9 +434,10 @@ func TestAgentService_Stop(t *testing.T) {
 
 func TestAgentService_Delete_RemoveContainer(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:        "id-del",
-		AgentName: "coder",
-		Status:    "running",
+		ID:            "id-del",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		Status:        "running",
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, _ := newTestService(t, fake)
@@ -472,9 +479,10 @@ func TestAgentService_Delete_ArchivedIdempotent(t *testing.T) {
 
 func TestAgentService_Delete_Purge(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:        "id-del2",
-		AgentName: "coder",
-		Status:    "running",
+		ID:            "id-del2",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		Status:        "running",
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, dataDir := newTestService(t, fake)
@@ -503,22 +511,24 @@ func TestAgentService_Delete_Purge(t *testing.T) {
 func TestAgentService_List(t *testing.T) {
 	listResult := []docker.RuntimeContainer{
 		{
-			ID:         "id-1",
-			Name:       "cloud-agent-coder-aaa",
-			AgentName:  "coder",
-			InstanceID: "aaa",
-			Status:     "running",
-			HostPort:   31000,
-			CreatedAt:  "2026-06-25T10:00:00Z",
+			ID:            "id-1",
+			Name:          "cloud-agent-coder-aaa",
+			DeploymentKey: "coder",
+			RootAgentID:   "coder",
+			InstanceID:    "aaa",
+			Status:        "running",
+			HostPort:      31000,
+			CreatedAt:     "2026-06-25T10:00:00Z",
 		},
 		{
-			ID:         "id-2",
-			Name:       "cloud-agent-writer-bbb",
-			AgentName:  "writer",
-			InstanceID: "bbb",
-			Status:     "exited",
-			HostPort:   0,
-			CreatedAt:  "2026-06-25T11:00:00Z",
+			ID:            "id-2",
+			Name:          "cloud-agent-writer-bbb",
+			DeploymentKey: "writer",
+			RootAgentID:   "writer",
+			InstanceID:    "bbb",
+			Status:        "exited",
+			HostPort:      0,
+			CreatedAt:     "2026-06-25T11:00:00Z",
 		},
 	}
 	fake := &fakeDockerClient{listResult: listResult}
@@ -564,10 +574,11 @@ func TestAgentService_List(t *testing.T) {
 func TestAgentService_List_IncludeArchived(t *testing.T) {
 	listResult := []docker.RuntimeContainer{
 		{
-			ID:        "id-active",
-			AgentName: "active-agent",
-			Status:    "running",
-			HostPort:  31000,
+			ID:            "id-active",
+			DeploymentKey: "active-agent",
+			RootAgentID:   "active-agent",
+			Status:        "running",
+			HostPort:      31000,
 		},
 	}
 	fake := &fakeDockerClient{listResult: listResult}
@@ -592,10 +603,10 @@ func TestAgentService_List_IncludeArchived(t *testing.T) {
 	require.Len(t, responses, 2, "includeArchived must merge active + archived")
 
 	archived := responses[0]
-	if archived.AgentName != archivedName {
+	if archived.DeploymentKey != archivedName {
 		archived = responses[1]
 	}
-	assert.Equal(t, archivedName, archived.AgentName)
+	assert.Equal(t, archivedName, archived.DeploymentKey)
 	assert.Equal(t, model.StatusArchived, archived.Status)
 	assert.Empty(t, archived.ContainerID, "archived agent must have no container id")
 	assert.Equal(t, 0, archived.HostPort, "archived agent must have no host port")
@@ -616,7 +627,10 @@ func TestAgentService_Get_Archived(t *testing.T) {
 
 	resp, err := svc.Get(context.Background(), "coder")
 	require.NoError(t, err)
-	assert.Equal(t, "coder", resp.AgentName)
+	// Archived entries are keyed by deployment key alone (issue #18): the
+	// bare root id is not recovered from disk here.
+	assert.Empty(t, resp.AgentName)
+	assert.Equal(t, "coder", resp.DeploymentKey)
 	assert.Equal(t, model.StatusArchived, resp.Status)
 	assert.Empty(t, resp.ContainerID)
 	assert.Equal(t, filepath.Join(dataDir, "coder", "agents", "agents.yaml"), resp.YamlPath)
@@ -742,9 +756,10 @@ func TestAgentService_Create_NoSkills_DoesNotInvokeInstaller(t *testing.T) {
 // store it at Create time.
 func TestAgentService_Get_OmitsRuntimeToken(t *testing.T) {
 	existing := &docker.RuntimeContainer{
-		ID:        "id-abc",
-		AgentName: "coder",
-		Status:    "running",
+		ID:            "id-abc",
+		DeploymentKey: "coder",
+		RootAgentID:   "coder",
+		Status:        "running",
 	}
 	fake := &fakeDockerClient{existing: existing}
 	svc, _ := newTestService(t, fake)
@@ -759,8 +774,8 @@ func TestAgentService_Get_OmitsRuntimeToken(t *testing.T) {
 // by List. Returning N tokens in one response would magnify the leak surface.
 func TestAgentService_List_OmitsRuntimeToken(t *testing.T) {
 	listResult := []docker.RuntimeContainer{
-		{ID: "id-1", AgentName: "coder", Status: "running"},
-		{ID: "id-2", AgentName: "writer", Status: "running"},
+		{ID: "id-1", DeploymentKey: "coder", RootAgentID: "coder", Status: "running"},
+		{ID: "id-2", DeploymentKey: "writer", RootAgentID: "writer", Status: "running"},
 	}
 	fake := &fakeDockerClient{listResult: listResult}
 	svc, _ := newTestService(t, fake)
@@ -770,7 +785,7 @@ func TestAgentService_List_OmitsRuntimeToken(t *testing.T) {
 	for i, r := range responses {
 		assert.Empty(t, r.RuntimeToken,
 			"responses[%d] (%s) must not contain runtime token; List never returns it",
-			i, r.AgentName)
+			i, r.DeploymentKey)
 	}
 }
 
@@ -942,12 +957,13 @@ func TestAgentService_Create_HubOrgForceRebuild(t *testing.T) {
 
 	existing := func() *docker.RuntimeContainer {
 		return &docker.RuntimeContainer{
-			ID:         "existing-id",
-			Name:       "cloud-agent-coder-oldid",
-			AgentName:  "coder",
-			InstanceID: "oldid",
-			Status:     "running",
-			HostPort:   30000,
+			ID:            "existing-id",
+			Name:          "cloud-agent-coder-oldid",
+			DeploymentKey: "coder",
+			RootAgentID:   "coder",
+			InstanceID:    "oldid",
+			Status:        "running",
+			HostPort:      30000,
 		}
 	}
 
@@ -1141,6 +1157,7 @@ func TestAgentService_Create_InstallsArtifactsForWholeClosure(t *testing.T) {
 
 	req := validRequest()
 	req.RootAgentID = "parent"
+	req.DeploymentKey = "parent"
 	req.Agents = []model.AgentDefinition{
 		{
 			Name:         "parent",
@@ -1264,6 +1281,7 @@ func TestAgentService_Create_SharedToolDedupedButReferencedPerAgent(t *testing.T
 
 	req := validRequest()
 	req.RootAgentID = "parent"
+	req.DeploymentKey = "parent"
 	req.Agents = []model.AgentDefinition{
 		{
 			Name: "parent", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "s",
@@ -1297,4 +1315,112 @@ func TestAgentService_Create_SharedToolDedupedButReferencedPerAgent(t *testing.T
 		assert.Equal(t, []any{"./tools/shared-tool.mjs"}, e["customTools"],
 			"agent %v must keep its own customTools declaration", e["id"])
 	}
+}
+
+// TestAgentService_Create_DeploymentKeySplitFromRootID is the issue #18 core
+// acceptance: a tenant-scoped deployment key keys every infra resource
+// (container name, labels, dirs) while agents.yaml carries only the bare
+// runtime root id.
+func TestAgentService_Create_DeploymentKeySplitFromRootID(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.RootAgentID = "assistant"
+	req.DeploymentKey = "acme-assistant"
+	req.Agents = []model.AgentDefinition{{
+		Name: "assistant", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "p",
+	}}
+
+	resp, created, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, created)
+	assert.Equal(t, "assistant", resp.AgentName,
+		"agentName is the bare runtime root id")
+	assert.Equal(t, "acme-assistant", resp.DeploymentKey,
+		"deploymentKey is the infra resource key")
+
+	opts := fake.created
+	require.NotNil(t, opts)
+	assert.Equal(t, "acme-assistant", opts.DeploymentKey,
+		"docker opts must be keyed by the deployment key")
+	assert.Equal(t, "assistant", opts.RootAgentID,
+		"docker opts must carry the bare root id for the root-id label")
+	assert.Contains(t, opts.ContainerName, "cloud-agent-acme-assistant-",
+		"container name derives from the deployment key")
+	assert.Equal(t, filepath.Join(dataDir, "acme-assistant", "agents"), opts.AgentDir)
+	assert.Equal(t, filepath.Join(dataDir, "acme-assistant", "sessions"), opts.SessionDir)
+
+	// agents.yaml lives under the deployment key and uses bare runtime ids only.
+	yamlBytes, err := os.ReadFile(filepath.Join(dataDir, "acme-assistant", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	text := string(yamlBytes)
+	assert.Contains(t, text, "id: assistant")
+	assert.Contains(t, text, "x-deployer-root-agent-id: assistant")
+	assert.NotContains(t, text, "acme-assistant",
+		"the deployment key must never leak into agents.yaml")
+}
+
+// TestAgentService_Create_SameRootAgentIDDifferentDeploymentKeysCoexist is
+// issue #18 acceptance #4: two deployments sharing the bare rootAgentId under
+// different deployment keys must both be able to exist — the deployment key
+// alone keys infra resources, so a same-root second deployment never collides
+// with (or is deduped into) the first.
+func TestAgentService_Create_SameRootAgentIDDifferentDeploymentKeysCoexist(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	first := validRequest()
+	first.RootAgentID = "assistant"
+	first.DeploymentKey = "acme-assistant"
+	first.Agents = []model.AgentDefinition{{
+		Name: "assistant", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "p",
+	}}
+	_, created, err := svc.Create(context.Background(), first)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	// Simulate the first deployment's container now running.
+	fake.existing = &docker.RuntimeContainer{
+		ID: "id-1", DeploymentKey: "acme-assistant", RootAgentID: "assistant", Status: "running",
+	}
+
+	second := validRequest()
+	second.RootAgentID = "assistant"
+	second.DeploymentKey = "globex-assistant"
+	second.Agents = first.Agents
+
+	resp, created, err := svc.Create(context.Background(), second)
+	require.NoError(t, err)
+	require.True(t, created,
+		"a different deployment key must NOT be treated as idempotent reuse of the existing agent")
+	assert.Equal(t, "globex-assistant", resp.DeploymentKey)
+	assert.Equal(t, "assistant", resp.AgentName)
+
+	// Both deployments' resources coexist under their own keys.
+	assert.FileExists(t, filepath.Join(dataDir, "acme-assistant", "agents", "agents.yaml"))
+	assert.FileExists(t, filepath.Join(dataDir, "globex-assistant", "agents", "agents.yaml"))
+}
+
+// TestAgentService_Create_MissingDeploymentKey_NoSideEffects is issue #18
+// acceptance #5: a request without deploymentKey fails validation before any
+// file or Docker mutation.
+func TestAgentService_Create_MissingDeploymentKey_NoSideEffects(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.DeploymentKey = ""
+	req.RootAgentID = "assistant"
+	req.Agents = []model.AgentDefinition{{
+		Name: "assistant", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "p",
+	}}
+
+	_, _, err := svc.Create(context.Background(), req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deploymentKey is required")
+	assert.Nil(t, fake.created, "no container may be created behind a validation failure")
+	entries, rerr := os.ReadDir(dataDir)
+	require.NoError(t, rerr)
+	assert.Empty(t, entries, "no deployment directories may be created behind a validation failure")
 }

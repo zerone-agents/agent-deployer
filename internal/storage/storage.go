@@ -106,34 +106,38 @@ type runtimeAgentsYAML struct {
 	Aigc   *runtimeAigcSection `yaml:"aigc,omitempty"`
 	Hub    *runtimeHubSection  `yaml:"hub,omitempty"`
 	Agents []runtimeAgentEntry `yaml:"agents"`
-	// XDeployerManifest embeds the deployer-private artifact declarations
-	// (Skill/Tool url+hash) in the SAME authoritative file. The runtime's
-	// zod schema strips unknown top-level keys, so this section is invisible
-	// to the runtime while making the write a single atomic file replacement
-	// (fourth review round: one authoritative persisted document).
+	// XDeployerRootID records the bare runtime root agent id (issue #18): the
+	// storage directory is keyed by the deployment key, which may differ from
+	// the root id, so read-back cannot infer the root from the dir name. The
+	// runtime's zod schema strips unknown top-level keys — same mechanism as
+	// x-deployer-manifest, invisible to the runtime.
+	XDeployerRootID   string                    `yaml:"x-deployer-root-agent-id,omitempty"`
 	XDeployerManifest map[string]agentArtifacts `yaml:"x-deployer-manifest,omitempty"`
 }
 
 // WriteAgentYAML writes the complete agent graph to
-// <dataDir>/<rootName>/agents/agents.yaml in the runtime v2.4.0+ format: every
-// agent is a first-class entry and subagents are pure id references. Provider
-// credentials and model (runtime-global) are written to the root entry only.
+// <dataDir>/<deploymentKey>/agents/agents.yaml in the runtime v2.4.0+ format:
+// every agent is a first-class entry and subagents are pure id references.
+// The storage directory is keyed by the deployment key while the root entry
+// and the deployer-private x-deployer-root-agent-id marker carry the bare
+// runtime root agent id (issue #18). Provider credentials and model
+// (runtime-global) are written to the root entry only.
 // toolPaths maps agent id -> verified "./tools/..." paths for that agent.
 // Agents that declare skills get their per-agent skill dir injected as an
 // extraUserSkillDirs entry (user-level scan; see the service install layout).
-func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, toolPaths map[string][]string) error {
-	// Defense-in-depth: reject path traversal in the name parameter so a
+func (s *AgentStorage) WriteAgentYAML(deploymentKey string, rootAgentID string, agents []model.AgentDefinition, provider model.ProviderConfig, aigc *model.AigcConfig, hub *model.HubConfig, toolPaths map[string][]string) error {
+	// Defense-in-depth: reject path traversal in the deployment key so a
 	// caller cannot escape dataDir via "../" or absolute paths.
-	if rootName == "" || rootName == "." || rootName == ".." || strings.ContainsAny(rootName, `/\`) {
-		return fmt.Errorf("invalid agent name %q: must be a single path segment", rootName)
+	if deploymentKey == "" || deploymentKey == "." || deploymentKey == ".." || strings.ContainsAny(deploymentKey, `/\`) {
+		return fmt.Errorf("invalid deployment key %q: must be a single path segment", deploymentKey)
 	}
 
 	byID := make(map[string]bool, len(agents))
 	for _, a := range agents {
 		byID[a.Name] = true
 	}
-	if !byID[rootName] {
-		return fmt.Errorf("no agent with id %q in graph", rootName)
+	if !byID[rootAgentID] {
+		return fmt.Errorf("no agent with id %q in graph", rootAgentID)
 	}
 	promptRefs := computeSystemPromptRefs(agents)
 
@@ -160,7 +164,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 			entry.SystemPromptFile = ref
 		}
 
-		if a.Name == rootName {
+		if a.Name == rootAgentID {
 			// Runtime-global execution environment (issue #16): credentials and
 			// model on the root entry only; mounted agents reuse the root
 			// process environment and never receive their own copy.
@@ -195,7 +199,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		entries = append(entries, entry)
 	}
 
-	doc := runtimeAgentsYAML{Agents: entries}
+	doc := runtimeAgentsYAML{Agents: entries, XDeployerRootID: rootAgentID}
 
 	// Embed the artifact declarations that the runtime schema cannot express.
 	// Keeping them in the SAME file is what makes the update transactional:
@@ -242,7 +246,7 @@ func (s *AgentStorage) WriteAgentYAML(rootName string, agents []model.AgentDefin
 		return fmt.Errorf("marshal agent YAML: %w", err)
 	}
 
-	agentDir := filepath.Join(s.dataDir, rootName, "agents")
+	agentDir := filepath.Join(s.dataDir, deploymentKey, "agents")
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return fmt.Errorf("create agent directory: %w", err)
 	}
@@ -462,14 +466,17 @@ type AgentGraph struct {
 }
 
 // ReadAgentYAML reads the complete agent graph from
-// <dataDir>/<name>/agents/agents.yaml. The root entry is the one whose id
-// matches the storage name. Artifact declarations (Skill/Tool url+hash)
-// round-trip through the deployer-private x-deployer-manifest section
-// EMBEDDED in the same file; a legacy deploy-manifest.json sidecar from
-// pre-embedded-section versions is honored for compatibility (digest-bound)
-// only when the section is absent.
-func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
-	filePath := filepath.Join(s.dataDir, name, "agents", "agents.yaml")
+// <dataDir>/<deploymentKey>/agents/agents.yaml. Root resolution (issue #18):
+// new deployments carry the bare root id in the deployer-private
+// x-deployer-root-agent-id marker; deployments written before the split have
+// root id == storage name and no marker, so the dir name is the legacy
+// fallback. Artifact declarations (Skill/Tool url+hash) round-trip through
+// the deployer-private x-deployer-manifest section EMBEDDED in the same
+// file; a legacy deploy-manifest.json sidecar from pre-embedded-section
+// versions is honored for compatibility (digest-bound) only when the section
+// is absent.
+func (s *AgentStorage) ReadAgentYAML(deploymentKey string) (*AgentGraph, error) {
+	filePath := filepath.Join(s.dataDir, deploymentKey, "agents", "agents.yaml")
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("read agent YAML: %w", err)
@@ -484,14 +491,18 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 		return nil, ErrNoAgents
 	}
 
-	graph := &AgentGraph{RootAgentID: name}
+	rootID := doc.XDeployerRootID
+	if rootID == "" {
+		rootID = deploymentKey
+	}
+	graph := &AgentGraph{RootAgentID: rootID}
 	foundRoot := false
 	for _, e := range doc.Agents {
 		entryName := e.Name
 		if entryName == "" {
 			entryName = e.ID
 		}
-		if e.ID == name {
+		if e.ID == rootID {
 			foundRoot = true
 		}
 		def := model.AgentDefinition{
@@ -520,12 +531,12 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 			if !strings.HasPrefix(clean, "prompts"+string(filepath.Separator)) {
 				return nil, fmt.Errorf("agent %q: systemPromptFile %q escapes the prompts directory", entryName, e.SystemPromptFile)
 			}
-			target := filepath.Join(s.dataDir, name, "agents", clean)
+			target := filepath.Join(s.dataDir, deploymentKey, "agents", clean)
 			realTarget, rerr := filepath.EvalSymlinks(target)
 			if rerr != nil {
 				return nil, fmt.Errorf("read system prompt file for agent %q: %w", entryName, rerr)
 			}
-			realAgentDir, aerr := filepath.EvalSymlinks(filepath.Join(s.dataDir, name, "agents"))
+			realAgentDir, aerr := filepath.EvalSymlinks(filepath.Join(s.dataDir, deploymentKey, "agents"))
 			if aerr != nil {
 				return nil, fmt.Errorf("resolve agents directory: %w", aerr)
 			}
@@ -548,7 +559,7 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 		graph.Agents = append(graph.Agents, def)
 	}
 	if !foundRoot {
-		return nil, fmt.Errorf("no agent entry with id %q in YAML", name)
+		return nil, fmt.Errorf("no agent entry with id %q in YAML", rootID)
 	}
 	// Artifact declarations: prefer the embedded x-deployer-manifest section —
 	// same file, same generation, atomic by construction. Deployments written
@@ -566,7 +577,7 @@ func (s *AgentStorage) ReadAgentYAML(name string) (*AgentGraph, error) {
 		}
 		return graph, nil
 	}
-	if err := s.loadDeploymentManifest(name, graph, sha256Hex(data)); err != nil {
+	if err := s.loadDeploymentManifest(deploymentKey, graph, sha256Hex(data)); err != nil {
 		return nil, err
 	}
 	return graph, nil

@@ -19,7 +19,8 @@ func strPtr(v string) *string {
 
 func TestCreateAgentRequest_Validate_ValidRequest(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -54,7 +55,8 @@ func TestCreateAgentRequest_Validate_ValidRequest(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MissingAgentName(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "",
@@ -78,7 +80,8 @@ func TestCreateAgentRequest_Validate_MissingAgentName(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MissingAgentModel(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -102,7 +105,8 @@ func TestCreateAgentRequest_Validate_MissingAgentModel(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MissingAgentDescription(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -126,7 +130,8 @@ func TestCreateAgentRequest_Validate_MissingAgentDescription(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_WhitespaceOnlyDescription(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -150,7 +155,8 @@ func TestCreateAgentRequest_Validate_WhitespaceOnlyDescription(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MissingSystemPrompt(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -174,7 +180,8 @@ func TestCreateAgentRequest_Validate_MissingSystemPrompt(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_InvalidProviderProtocol(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -198,7 +205,8 @@ func TestCreateAgentRequest_Validate_InvalidProviderProtocol(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_AgentMissingName(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -227,7 +235,8 @@ func TestCreateAgentRequest_Validate_AgentMissingName(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_AgentMissingDescription(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -263,7 +272,8 @@ func TestCreateAgentRequest_Validate_NilRequest(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MaxTurnsZeroIsValid(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -287,7 +297,8 @@ func TestCreateAgentRequest_Validate_MaxTurnsZeroIsValid(t *testing.T) {
 
 func TestAgentDefinition_Validate_DuplicateAgentIDs(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -320,7 +331,8 @@ func TestAgentDefinition_Validate_DuplicateAgentIDs(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_OpenAIProtocol(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -343,7 +355,8 @@ func TestCreateAgentRequest_Validate_OpenAIProtocol(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MissingProviderBaseURL(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -367,7 +380,8 @@ func TestCreateAgentRequest_Validate_MissingProviderBaseURL(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MissingProviderAPIKey(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -389,7 +403,8 @@ func TestCreateAgentRequest_Validate_MissingProviderAPIKey(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_WhitespaceOnlyName(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "   ",
@@ -413,7 +428,8 @@ func TestCreateAgentRequest_Validate_WhitespaceOnlyName(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_MultipleAgentsOneInvalid(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -548,6 +564,7 @@ func TestContainerInfo_JSONMarshal(t *testing.T) {
 func TestCreateAgentRequest_JSONUnmarshal(t *testing.T) {
 	jsonData := `{
 		"rootAgentId": "coder",
+		"deploymentKey": "coder",
 		"agents": [
 			{
 				"name": "coder",
@@ -614,6 +631,7 @@ func TestCreateAgentRequest_JSONUnmarshal(t *testing.T) {
 func TestCreateAgentRequest_JSONUnmarshal_RuntimeToken(t *testing.T) {
 	jsonData := `{
 		"rootAgentId": "coder",
+		"deploymentKey": "coder",
 		"agents": [
 			{
 				"name": "coder",
@@ -641,6 +659,7 @@ func TestCreateAgentRequest_JSONUnmarshal_RuntimeToken(t *testing.T) {
 func TestCreateAgentRequest_JSONUnmarshal_MaxTurnsZero(t *testing.T) {
 	jsonData := `{
 		"rootAgentId": "coder",
+		"deploymentKey": "coder",
 		"agents": [
 			{
 				"name": "coder",
@@ -673,6 +692,7 @@ func TestCreateAgentRequest_JSONUnmarshal_MaxTurnsZero(t *testing.T) {
 func TestCreateAgentRequest_JSONUnmarshal_OmittedMaxTurns(t *testing.T) {
 	jsonData := `{
 		"rootAgentId": "coder",
+		"deploymentKey": "coder",
 		"agents": [
 			{
 				"name": "coder",
@@ -977,7 +997,8 @@ func TestMcpServerConfig_Validate(t *testing.T) {
 
 func TestAgentDefinition_Validate_ValidMcpServers(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1006,7 +1027,8 @@ func TestAgentDefinition_Validate_ValidMcpServers(t *testing.T) {
 
 func TestAgentDefinition_Validate_InvalidMcpType(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1034,6 +1056,7 @@ func TestAgentDefinition_Validate_InvalidMcpType(t *testing.T) {
 func TestCreateAgentRequest_JSONUnmarshal_WithMcpServers(t *testing.T) {
 	jsonData := `{
 		"rootAgentId": "coder",
+		"deploymentKey": "coder",
 		"agents": [
 			{
 				"name": "coder",
@@ -1100,7 +1123,8 @@ func TestAgentDefinition_JSONMarshal_McpServersUsesTypeField(t *testing.T) {
 
 func TestAgentDefinition_Validate_DatasetsValid(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1126,7 +1150,8 @@ func TestAgentDefinition_Validate_DatasetsValid(t *testing.T) {
 
 func TestAgentDefinition_Validate_DatasetsEmptyID(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1153,7 +1178,8 @@ func TestAgentDefinition_Validate_DatasetsEmptyID(t *testing.T) {
 
 func TestAgentDefinition_Validate_DatasetsEmptyDescription(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1180,7 +1206,8 @@ func TestAgentDefinition_Validate_DatasetsEmptyDescription(t *testing.T) {
 
 func TestAgentDefinition_Validate_DatasetsWhitespaceDescription(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1438,7 +1465,8 @@ func TestAigcConfig_Validate(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_InvalidAigc(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1463,7 +1491,8 @@ func TestCreateAgentRequest_Validate_InvalidAigc(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_RuntimeTokenRequired(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1487,7 +1516,8 @@ func TestCreateAgentRequest_Validate_RuntimeTokenRequired(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_RuntimeTokenLeadingWhitespace(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1511,7 +1541,8 @@ func TestCreateAgentRequest_Validate_RuntimeTokenLeadingWhitespace(t *testing.T)
 
 func TestCreateAgentRequest_Validate_RuntimeTokenTrailingWhitespace(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1642,7 +1673,8 @@ func TestHubConfig_Validate(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_InvalidHub(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1667,7 +1699,8 @@ func TestCreateAgentRequest_Validate_InvalidHub(t *testing.T) {
 
 func TestCreateAgentRequest_Validate_ValidHub(t *testing.T) {
 	req := CreateAgentRequest{
-		RootAgentID: "coder",
+		RootAgentID:   "coder",
+		DeploymentKey: "coder",
 		Agents: []AgentDefinition{
 			{
 				Name:         "coder",
@@ -1865,7 +1898,8 @@ func TestAgentDefinition_JSONFieldNames(t *testing.T) {
 
 func validGraphRequest() CreateAgentRequest {
 	return CreateAgentRequest{
-		RootAgentID: "parent",
+		RootAgentID:   "parent",
+		DeploymentKey: "parent",
 		Agents: []AgentDefinition{
 			{
 				Name:         "parent",
@@ -1923,6 +1957,41 @@ func TestCreateAgentRequest_Validate_RootNotInAgents(t *testing.T) {
 	err := req.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `rootAgentId "ghost" not found in agents`)
+}
+
+func TestCreateAgentRequest_Validate_MissingDeploymentKey(t *testing.T) {
+	req := validGraphRequest()
+	req.DeploymentKey = ""
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deploymentKey is required")
+}
+
+func TestCreateAgentRequest_Validate_DeploymentKeyNotSanitized(t *testing.T) {
+	req := validGraphRequest()
+	req.DeploymentKey = "Acme_Assistant" // uppercase + underscore: SanitizeName yields "acme-assistant" != input
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sanitized deployment name")
+}
+
+func TestCreateAgentRequest_Validate_DeploymentKeyInvalidChars(t *testing.T) {
+	req := validGraphRequest()
+	req.DeploymentKey = "acme/assistant" // path separator: must be rejected as a single path segment
+	err := req.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deploymentKey")
+}
+
+// TestCreateAgentRequest_Validate_RootAgentIDAllowsBareAgentName pins the
+// issue #18 split: after the sanitized-form constraint moved to
+// deploymentKey, rootAgentId may be any valid agent name (dots, underscores,
+// uppercase) — it no longer doubles as the deployment resource key.
+func TestCreateAgentRequest_Validate_RootAgentIDAllowsBareAgentName(t *testing.T) {
+	req := validGraphRequest()
+	req.RootAgentID = "Help.Bot_v2"
+	req.Agents[0].Name = "Help.Bot_v2"
+	require.NoError(t, req.Validate())
 }
 
 func TestCreateAgentRequest_Validate_DuplicateAgentID(t *testing.T) {
@@ -2068,6 +2137,7 @@ func TestCreateAgentRequest_ErrorMessagesDoNotLeakSecrets(t *testing.T) {
 func TestAgentDefinition_ExtraUserSkillDirsNotExposedInAPI(t *testing.T) {
 	jsonData := `{
 		"rootAgentId": "coder",
+		"deploymentKey": "coder",
 		"agents": [
 			{
 				"name": "coder",
