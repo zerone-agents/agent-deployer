@@ -1973,3 +1973,116 @@ func TestWriteAgentYAML_ScopedKeyRedeployWithBareRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(yamlBytes), "id: acme-assistant")
 }
+
+// TestWriteAgentYAML_ContainsEffortThinking guards issue #22: the root
+// entry's effort/thinking land in agents.yaml under the runtime contract
+// keys; non-root entries never carry them (the storage write path is
+// root-only, mirroring the runtime's root-level application — same family
+// as model/maxSessionQueries).
+func TestWriteAgentYAML_ContainsEffortThinking(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	budget := 8192
+	agents := []model.AgentDefinition{
+		{
+			Name:         "coder",
+			Description:  "Coordinates work",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "You are a coding assistant.",
+			Effort:       "high",
+			Thinking:     &model.ThinkingConfig{Type: "enabled", BudgetTokens: &budget},
+			Subagents:    []string{"reviewer"},
+		},
+		{
+			Name:         "reviewer",
+			Description:  "Review code",
+			SystemPrompt: "You are a code reviewer.",
+			// hand-built graph with non-root declarations: model.Validate
+			// rejects these upstream; storage must not write them regardless
+			Effort:   "low",
+			Thinking: &model.ThinkingConfig{Type: "disabled"},
+		},
+	}
+
+	err := store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+
+	var doc map[string]interface{}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	entries := doc["agents"].([]interface{})
+	require.Len(t, entries, 2)
+
+	root := entries[0].(map[string]interface{})
+	assert.Equal(t, "high", root["effort"])
+	thinking := root["thinking"].(map[string]interface{})
+	assert.Equal(t, "enabled", thinking["type"])
+	assert.Equal(t, 8192, thinking["budgetTokens"])
+
+	reviewer := entries[1].(map[string]interface{})
+	_, hasEffort := reviewer["effort"]
+	assert.False(t, hasEffort, "non-root effort must not be serialized")
+	_, hasThinking := reviewer["thinking"]
+	assert.False(t, hasThinking, "non-root thinking must not be serialized")
+}
+
+// TestWriteAgentYAML_EffortThinkingOmitted guards the zero-behavior-change
+// contract (issue #22): a graph that does not declare effort/thinking
+// produces an agents.yaml without the keys — pre-#22 deployments round-trip
+// unchanged.
+func TestWriteAgentYAML_EffortThinkingOmitted(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	agents := []model.AgentDefinition{
+		{Name: "coder", Description: "d", Model: "claude-sonnet-4-6", SystemPrompt: "p"},
+	}
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil))
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "effort:")
+	assert.NotContains(t, string(data), "thinking:")
+}
+
+// TestReadAgentYAML_EffortThinkingRoundTrip guards the lossless read-back
+// contract for issue #22: declared values round-trip exactly, and a file
+// written without the keys (the pre-#22 format) reads back as zero values.
+func TestReadAgentYAML_EffortThinkingRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewAgentStorage(tmpDir)
+
+	budget := 4096
+	agents := []model.AgentDefinition{
+		{
+			Name:         "coder",
+			Description:  "d",
+			Model:        "claude-sonnet-4-6",
+			SystemPrompt: "p",
+			Effort:       "medium",
+			Thinking:     &model.ThinkingConfig{Type: "adaptive", BudgetTokens: &budget},
+		},
+	}
+	require.NoError(t, store.WriteAgentYAML("coder", "coder", agents, model.ProviderConfig{}, nil, nil, nil))
+
+	graph, err := store.ReadAgentYAML("coder")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 1)
+	assert.Equal(t, "medium", graph.Agents[0].Effort)
+	require.NotNil(t, graph.Agents[0].Thinking)
+	assert.Equal(t, "adaptive", graph.Agents[0].Thinking.Type)
+	require.NotNil(t, graph.Agents[0].Thinking.BudgetTokens)
+	assert.Equal(t, 4096, *graph.Agents[0].Thinking.BudgetTokens)
+
+	// pre-#22 file (no keys) reads back as non-declared zero values
+	oldFormat := "agents:\n  - id: coder\n    name: coder\n    description: d\n    model: claude-sonnet-4-6\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "coder", "agents", "agents.yaml"), []byte(oldFormat), 0644))
+	graph, err = store.ReadAgentYAML("coder")
+	require.NoError(t, err)
+	require.Len(t, graph.Agents, 1)
+	assert.Empty(t, graph.Agents[0].Effort)
+	assert.Nil(t, graph.Agents[0].Thinking)
+}

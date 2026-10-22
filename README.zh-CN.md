@@ -262,6 +262,10 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agent-deployer ./cmd/server
 
 # 集成测试需要运行中的 Docker daemon，以及本地已存在的 runtime 镜像
 # （默认 open-agent-runtime:v2.4.0，图协议要求 v2.4.0+；可用替身 tag）。
+# 部分用例 pin 更高的镜像门槛：声明 effort 需 v2.9.0+（issue #22），
+# 跑套件前请先备好两个替身 tag：
+#   docker tag nginx:alpine open-agent-runtime:v2.4.0
+#   docker tag nginx:alpine open-agent-runtime:v2.9.0
 # 默认跳过，仅在 integration 构建标签下运行。
 go test -tags=integration ./tests/integration/... -v -timeout 5m
 

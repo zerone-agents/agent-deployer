@@ -9,12 +9,13 @@ import (
 )
 
 // checkRuntimeImage enforces the runtime version floor for the agent graph
-// protocol (issue #16): the base floor is v2.4.0, and declaring the
+// protocol (issue #16): the base floor is v2.4.0, declaring the
 // maxSessionQueries contract key raises it to v2.6.0 (runtime PR #56 / SDK
-// 3.1.0 rename — pre-2.6.0 runtimes silently strip the key, so a graph that
-// uses it must not deploy onto them). A pinned tag must be semver >= the
-// floor; :latest (or an untagged image) is accepted only when the operator
-// explicitly assumes it via AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST.
+// 3.1.0 rename), and declaring the effort contract key raises it to v2.9.0
+// (runtime #77) — in both cases older runtimes silently strip the key, so a
+// graph that uses it must not deploy onto them. A pinned tag must be semver
+// >= the floor; :latest (or an untagged image) is accepted only when the
+// operator explicitly assumes it via AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST.
 func (s *AgentService) checkRuntimeImage(minMajor, minMinor int) error {
 	img := s.cfg.RuntimeImage
 	tag := imageTag(img)
@@ -38,6 +39,19 @@ func (s *AgentService) checkRuntimeImage(minMajor, minMinor int) error {
 func declaresMaxSessionQueries(agents []model.AgentDefinition) bool {
 	for _, a := range agents {
 		if a.MaxSessionQueries != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// declaresEffort reports whether any agent in the graph uses the effort
+// contract key (issue #22), which requires runtime v2.9.0+ (runtime #77;
+// pre-2.9.0 runtimes silently strip it — same failure mode that gates
+// maxSessionQueries to v2.6.0).
+func declaresEffort(agents []model.AgentDefinition) bool {
+	for _, a := range agents {
+		if a.Effort != "" {
 			return true
 		}
 	}

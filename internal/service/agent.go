@@ -93,11 +93,16 @@ func (s *AgentService) Create(ctx context.Context, req *model.CreateAgentRequest
 	// The complete agent graph protocol requires runtime v2.4.0+; a graph that
 	// declares the maxSessionQueries contract key additionally requires v2.6.0+
 	// (pre-2.6.0 runtimes strip the key after the SDK 3.1.0 rename — runtime
-	// PR #56). Refuse deployment when the configured image cannot be proven
-	// compatible instead of silently degrading on an old runtime.
+	// PR #56), and one that declares the effort contract key requires v2.9.0+
+	// (runtime #77, issue #22; older runtimes strip it the same way). Refuse
+	// deployment when the configured image cannot be proven compatible instead
+	// of silently degrading on an old runtime.
 	minMinor := 4
 	if declaresMaxSessionQueries(req.Agents) {
 		minMinor = 6
+	}
+	if declaresEffort(req.Agents) {
+		minMinor = 9
 	}
 	if err := s.checkRuntimeImage(2, minMinor); err != nil {
 		return nil, false, err

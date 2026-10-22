@@ -11,6 +11,16 @@
 //
 // The tests are idempotent: they clean up any containers and data they create,
 // even on assertion failure (via t.Cleanup).
+//
+// Stand-in tags: the suite never pulls images, it asserts topology against
+// locally tagged stand-ins. Prepare both floors the suite pins before
+// running:
+//
+//	docker tag nginx:alpine open-agent-runtime:v2.4.0   # base graph floor
+//	docker tag nginx:alpine open-agent-runtime:v2.9.0   # issue #22: declared effort raises the floor
+//
+// A missing higher tag fails loudly at create time (the deployment is
+// refused against a non-existent image), never silently skips.
 package integration
 
 import (
@@ -72,12 +82,20 @@ func requireDocker(t *testing.T) *docker.Client {
 }
 
 func newStack(t *testing.T) (*service.AgentService, *gin.Engine) {
+	return newStackWithImage(t, runtimeImage)
+}
+
+// newStackWithImage builds the same stack against an explicit image
+// reference — needed by tests whose request bodies raise the runtime image
+// floor above the base stand-in tag (issue #22: declared effort requires
+// v2.9.0+). The override must exist locally, same as runtimeImage.
+func newStackWithImage(t *testing.T, image string) (*service.AgentService, *gin.Engine) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{
 		DataDir:              dir,
 		Port:                 18080,
-		RuntimeImage:         runtimeImage,
+		RuntimeImage:         image,
 		RuntimeContainerPort: 3000,
 	}
 	dc := requireDocker(t)
@@ -1355,4 +1373,92 @@ func TestIntegration_DeploymentKeySplit(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "status body: %s", w.Body.String())
 	w = doRequest(t, r, http.MethodGet, "/api/v1/agents/"+deploymentKey, nil)
 	assert.Equal(t, http.StatusOK, w.Code, "get body: %s", w.Body.String())
+}
+
+// TestIntegration_EffortThinkingPassthrough pins the issue #22 contract at
+// the HTTP boundary on a real Docker daemon: a root declaring effort +
+// thinking deploys on a v2.9.0+ image (declared effort raises the floor),
+// both values land in agents.yaml on the root entry only, the same body is
+// refused with 503 on the base-floor stand-in image, and a child declaring
+// effort is rejected with 400 (root-only). The v2.9.0 tag is a local
+// stand-in like the v2.4.0 one: these are topology assertions only.
+func TestIntegration_EffortThinkingPassthrough(t *testing.T) {
+	svc, r := newStackWithImage(t, "open-agent-runtime:v2.9.0")
+	agentName := "it-effort-" + time.Now().Format("150405")
+	deploymentKey := naming.DeploymentKey(agentName)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_ = svc.Delete(ctx, agentName, true)
+	})
+
+	budget := 8192
+	req := model.CreateAgentRequest{
+		RootAgentID:   naming.RootAgentID(agentName),
+		DeploymentKey: deploymentKey,
+		Agents: []model.AgentDefinition{
+			{
+				Name:         agentName,
+				Description:  "root with reasoning config",
+				Model:        "claude-sonnet-4-6",
+				SystemPrompt: "root prompt",
+				Effort:       "high",
+				Thinking:     &model.ThinkingConfig{Type: "enabled", BudgetTokens: &budget},
+				Subagents:    []string{agentName + "-child"},
+			},
+			{
+				Name:         agentName + "-child",
+				Description:  "plain child",
+				SystemPrompt: "child prompt",
+			},
+		},
+		Provider: model.ProviderConfig{
+			Protocol: "anthropic-messages",
+			BaseURL:  "https://api.anthropic.com",
+			APIKey:   "sk-integration-fake-key",
+		},
+		RuntimeToken: "it-runtime-token",
+	}
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	// 1. Create on the v2.9.0 stand-in: 201.
+	w := doRequest(t, r, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusCreated, w.Code, "create body: %s", w.Body.String())
+
+	// 2. agents.yaml: effort/thinking on the root entry only.
+	yamlBytes, err := os.ReadFile(filepath.Join(svc.Config().DataDir, string(deploymentKey), "agents", "agents.yaml"))
+	require.NoError(t, err)
+	var doc map[string]interface{}
+	require.NoError(t, yaml.Unmarshal(yamlBytes, &doc))
+	entries := doc["agents"].([]interface{})
+	require.Len(t, entries, 2)
+	root := entries[0].(map[string]interface{})
+	assert.Equal(t, "high", root["effort"])
+	thinking := root["thinking"].(map[string]interface{})
+	assert.Equal(t, "enabled", thinking["type"])
+	assert.Equal(t, 8192, thinking["budgetTokens"])
+	child := entries[1].(map[string]interface{})
+	_, hasEffort := child["effort"]
+	assert.False(t, hasEffort, "child entry must not carry effort")
+	_, hasThinking := child["thinking"]
+	assert.False(t, hasThinking, "child entry must not carry thinking")
+
+	// 3. Same body against the base-floor stand-in (v2.4.0): the effort
+	// declaration raises the required floor to v2.9.0, so the deployment is
+	// refused with 503 instead of silently degrading.
+	_, rOld := newStackWithImage(t, runtimeImage)
+	wOld := doRequest(t, rOld, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusServiceUnavailable, wOld.Code, "old image body: %s", wOld.Body.String())
+	assert.Contains(t, wOld.Body.String(), "incompatible")
+
+	// 4. A child declaring effort is rejected with 400 on any image —
+	// graph validation runs before the image gate.
+	req.Agents[1].Effort = "low"
+	childBody, err := json.Marshal(req)
+	require.NoError(t, err)
+	wChild := doRequest(t, r, http.MethodPost, "/api/v1/agents", childBody)
+	assert.Equal(t, http.StatusBadRequest, wChild.Code, "child effort body: %s", wChild.Body.String())
+	assert.Contains(t, wChild.Body.String(), "effort is a runtime-global field")
 }

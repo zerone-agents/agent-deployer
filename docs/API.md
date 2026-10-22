@@ -447,7 +447,7 @@ Graph-level validation (all failures return 400 with an explicit diagnostic):
 - Agent ids are unique across the graph (`duplicate agent id`).
 - Every `subagents` reference must exist (`references unknown subagent`), must not repeat (`duplicates subagent reference`), and must not point at itself (`references itself`).
 - Cycles are rejected outright (`subagent reference cycle detected`), even though the runtime truncates delegation at depth 1.
-- Runtime-global fields are root-only: a non-root agent declaring `model` / `maxSessionQueries` / `permissionMode` is rejected instead of being silently ignored at mount time.
+- Runtime-global fields are root-only: a non-root agent declaring `model` / `maxSessionQueries` / `permissionMode` / `effort` / `thinking` is rejected instead of being silently ignored at mount time.
 - The root requires both `model` and `systemPrompt`.
 - An agent declaring `skills` must include `"user"` in its `settingSources` (per-agent skill directories are scanned at user level).
 - The same tool/skill `name` across agents requires an identical `url`+`hash` declaration (`conflicting declarations`); identical declarations are shared artifacts and download once (tools) / install per agent (skills).
@@ -465,6 +465,8 @@ One full Agent-local definition inside the deployment graph. Every entry — roo
 | `maxTurns` | int \| null | No | `null` means unlimited | Maximum conversation turns for this agent (agent-local) |
 | `maxSessionQueries` | int \| null | Root only | — | Runtime-global session-level turn limit. YAML contract key introduced with runtime v2.6.0 (SDK 3.1.0 rename of `maxSessionTurns`); on v2.4.0/v2.5.0 the legacy key name applies, on v2.6.0+ only `maxSessionQueries` is honored |
 | `permissionMode` | string | Root only | — | Runtime-global permission mode, e.g. `auto` |
+| `effort` | string | Root only | Non-blank when declared | Runtime-global reasoning effort (issue #22): presets `low`/`medium`/`high`/`xhigh`/`max`, custom values pass through to the provider as-is (no enum — the per-model whitelist stays caller-side). Requires runtime **v2.9.0+** (runtime #77): older runtimes strip the key, so declaring it against a lower pinned image is refused with 503 instead of silently degrading |
+| `thinking` | ThinkingConfig | Root only | See ThinkingConfig definition | Runtime-global extended-thinking configuration (issue #22), e.g. `{"type": "enabled", "budgetTokens": 8192}` — mirrors the SDK `ThinkingConfig`. Supported since runtime v2.4.0 (the base floor), so it raises no extra version gate |
 | `tools` | string[] | No | — | Agent-local allow-list of tool names |
 | `disallowedTools` | string[] | No | — | Agent-local deny-list of tool names (runtime v2.4.0+). Round-trips losslessly into agents.yaml and read-back |
 | `customTools` | ToolSource[] | No | See ToolSource definition; duplicate names/local files rejected; same name across agents requires identical declaration | Tool files downloaded, hash-verified, and installed into the shared flat `<agentsDir>/tools` directory before container creation; this agent's YAML entry references its own installed paths |
@@ -494,6 +496,17 @@ Describes a single custom Tool file to download, hash-verify, and install for th
 
 Behavior: files are downloaded (max 5 MiB), stream-hash-verified, and atomically installed under the agent config mount before the replacement container is created. Any tool install failure aborts the request (HTTP 422/502) — no container is started. The runtime derives the tool name from the file's default-exported definition, not the filename. Tools carry full Node.js privileges: only Node built-ins, `@zerone-agent/agent-runtime/tools`, and `zod` are supported; dependencies are not installed.
 
+### ThinkingConfig
+
+Extended-thinking configuration for the root agent (issue #22). Mirrors the SDK `ThinkingConfig` and the runtime's `ThinkingConfigSchema` in `open-agent-runtime` `src/config.ts` exactly.
+
+| Field | Type | Required | Validation Rules | Description |
+|---|---|---|---|---|
+| `type` | string | Yes | One of `adaptive` / `enabled` / `disabled` | Thinking mode. An invalid value is rejected with 400 — the runtime's Zod schema would fail the whole config parse at container startup otherwise |
+| `budgetTokens` | int | No | — (pure passthrough; the runtime schema does not constrain it) | Token budget when `type` is `enabled`. Nil means the key is omitted from `agents.yaml` |
+
+The whole object is optional: a root without `thinking` writes no `thinking:` key, and pre-issue-#22 deployments round-trip byte-identical through read-back.
+
 ### Migration from the inline protocol
 
 `SubagentDefinition` (the inline five-field stub: `name`/`description`/`prompt`/`tools`/`maxTurns`) was **removed** in deployer v3.0.0. Requests carrying the legacy `"agent"` field are rejected with 400 and an explicit diagnostic — the legacy shape is never silently reinterpreted, because field loss would silently downgrade child capabilities.
@@ -507,7 +520,7 @@ Migration mapping:
 | Parent's `subagents` stub array | `subagents: ["<stub1-name>", "<stub2-name>"]` (pure id references) |
 | (not expressible before) | Child `mcpServers` / `customTools` / `skills` / `settingSources` / `datasets` / `disallowedTools` / `maxTurns` — each child now owns its full Agent-local profile |
 
-Note: child `model` / `maxSessionQueries` / `permissionMode` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
+Note: child `model` / `maxSessionQueries` / `permissionMode` / `effort` / `thinking` remain root-only runtime-global fields (mounted agents reuse the root runtime's provider, model, credentials, cwd, and process environment).
 
 ### Migration from rootAgentId-scoped deployments
 
@@ -681,7 +694,7 @@ curl -X DELETE "$DEPLOYER/agents/acme-coder?removeData=true" ${API_KEY:+-H "Auth
 | Symptom | What to Check |
 |---|---|
 | Create returns 400 `deploymentKey is required` | Pre-split client: the request lacks `deploymentKey`. Add it (sanitized `[a-z0-9-]`), keeping `rootAgentId` as the bare root agent id (see Migration from rootAgentId-scoped deployments) |
-| Create returns 400 `invalid request` | Check `rootAgentId` + `deploymentKey` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionQueries`/`permissionMode` are root-only |
+| Create returns 400 `invalid request` | Check `rootAgentId` + `deploymentKey` + `agents[]`, the root entry's `model`/`systemPrompt`, and `provider.protocol/baseUrl/lockedApiKey`; graph references must resolve with no duplicates/self references/cycles; agents declaring `skills` need `"user"` in `settingSources`; `model`/`maxSessionQueries`/`permissionMode`/`effort`/`thinking` are root-only |
 | Create returns 400 mentioning `legacy request shape` | The request uses the removed inline `"agent"` field — migrate to `rootAgentId` + `agents` (see Migration from the inline protocol) |
 | Create returns 503 `runtime image incompatible` | Pin `AGENT_DEPLOYER_RUNTIME_IMAGE` to a v2.4.0+ tag, or set `AGENT_DEPLOYER_RUNTIME_IMAGE_ASSUME_LATEST=true` when `:latest` is known to be v2.4.0+ |
 | Create returns 500 `find existing container` | Check whether the deployer container can access `/var/run/docker.sock` |
