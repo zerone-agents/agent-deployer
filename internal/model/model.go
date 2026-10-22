@@ -187,6 +187,33 @@ func (t ToolSource) Validate() error {
 	return nil
 }
 
+// ThinkingConfig carries the extended-thinking configuration for the root
+// agent (SDK AgentOptions.thinking, issue #22). Field names and constraints
+// mirror the runtime's Zod schema (ThinkingConfigSchema in open-agent-runtime
+// src/config.ts) exactly: type is required ("adaptive" | "enabled" |
+// "disabled"); budgetTokens is a pure passthrough — the runtime schema does
+// not constrain it, so neither do we.
+type ThinkingConfig struct {
+	Type         string `json:"type" yaml:"type"`
+	BudgetTokens *int   `json:"budgetTokens,omitempty" yaml:"budgetTokens,omitempty"`
+}
+
+// Validate checks the thinking config against the runtime schema constraints.
+// A nil config is always valid. The type enum is enforced fail-fast here
+// because an invalid value would fail the runtime's whole-config Zod parse
+// at container startup.
+func (t *ThinkingConfig) Validate() error {
+	if t == nil {
+		return nil
+	}
+	switch t.Type {
+	case "adaptive", "enabled", "disabled":
+		return nil
+	default:
+		return fmt.Errorf("thinking type must be one of: adaptive, enabled, disabled, got %q", t.Type)
+	}
+}
+
 // AgentDefinition is a complete Agent-local definition inside the deployment
 // graph (issue #16). Subagents are id references to other entries in the same
 // graph; mounted agents never inherit, merge, or fall back to parent
@@ -196,13 +223,27 @@ type AgentDefinition struct {
 	// Description is a short human/agent-readable summary of what the agent
 	// does. Required on every entry: agent-runtime rejects configs without it,
 	// and it is what the parent agent's Task tool shows when mounting subagents.
-	Description       string   `json:"description"`
-	Model             string   `json:"model"`
-	SystemPrompt      string   `json:"systemPrompt"`
-	MaxTurns          *int     `json:"maxTurns"`
-	MaxSessionQueries *int     `json:"maxSessionQueries,omitempty"`
-	PermissionMode    string   `json:"permissionMode,omitempty"`
-	Tools             []string `json:"tools,omitempty"`
+	Description       string `json:"description"`
+	Model             string `json:"model"`
+	SystemPrompt      string `json:"systemPrompt"`
+	MaxTurns          *int   `json:"maxTurns"`
+	MaxSessionQueries *int   `json:"maxSessionQueries,omitempty"`
+	PermissionMode    string `json:"permissionMode,omitempty"`
+	// Effort is the reasoning effort level (SDK AgentOptions.effort, issue
+	// #22): preset values low|medium|high|xhigh|max; custom values pass
+	// through to the provider as-is. No enum validation here — the
+	// per-model whitelist stays on the caller side (agent-hub
+	// provider_models.efforts). Runtime-global field (issue #16 family):
+	// the runtime applies it at the root level only and ignores mounted
+	// children's values, so declaring it on a non-root agent is rejected.
+	// Requires runtime v2.9.0+ (runtime #77; older runtimes strip the key).
+	Effort string `json:"effort,omitempty"`
+	// Thinking is the extended-thinking configuration (issue #22), same
+	// runtime-global family as Effort: only the root may declare it.
+	// Supported since runtime v2.4.0 (the image floor), so it needs no
+	// extra version gate.
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+	Tools    []string        `json:"tools,omitempty"`
 	// DisallowedTools denies tools for this agent (agent-local policy,
 	// runtime v2.4.0+).
 	DisallowedTools []string `json:"disallowedTools,omitempty"`
@@ -542,6 +583,12 @@ func (r *CreateAgentRequest) Validate() error {
 		if a.PermissionMode != "" {
 			return fmt.Errorf("agent %q: permissionMode is a runtime-global field; only the root agent may declare it", a.Name)
 		}
+		if a.Effort != "" {
+			return fmt.Errorf("agent %q: effort is a runtime-global field; only the root agent may declare it", a.Name)
+		}
+		if a.Thinking != nil {
+			return fmt.Errorf("agent %q: thinking is a runtime-global field; only the root agent may declare it", a.Name)
+		}
 	}
 
 	// Subagent reference integrity: existence, no duplicates, no self refs.
@@ -665,6 +712,15 @@ func (a *AgentDefinition) Validate() error {
 	}
 	if strings.TrimSpace(a.Description) == "" {
 		return fmt.Errorf("description is required")
+	}
+	if err := a.Thinking.Validate(); err != nil {
+		return err
+	}
+	// effort is a passthrough (no enum) but must not be blank: the runtime
+	// schema is z.string().min(1), and a whitespace-only value is garbage
+	// that would flow straight to the provider. Empty string == not declared.
+	if a.Effort != "" && strings.TrimSpace(a.Effort) == "" {
+		return fmt.Errorf("effort must not be blank")
 	}
 
 	seenDatasets := make(map[string]struct{}, len(a.Datasets))
