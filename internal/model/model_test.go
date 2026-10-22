@@ -574,6 +574,8 @@ func TestCreateAgentRequest_JSONUnmarshal(t *testing.T) {
 				"systemPrompt": "You are a coding assistant.",
 				"maxTurns": null,
 				"permissionMode": "auto",
+				"effort": "high",
+				"thinking": {"type": "enabled", "budgetTokens": 8192},
 				"tools": ["Read", "Write", "Edit", "Bash"],
 				"skills": [{"name": "code-review", "url": "https://example.com/cr.zip", "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
 				"settingSources": ["user"],
@@ -608,6 +610,11 @@ func TestCreateAgentRequest_JSONUnmarshal(t *testing.T) {
 	assert.Equal(t, "You are a coding assistant.", root.SystemPrompt)
 	assert.Nil(t, root.MaxTurns)
 	assert.Equal(t, "auto", root.PermissionMode)
+	assert.Equal(t, "high", root.Effort)
+	require.NotNil(t, root.Thinking)
+	assert.Equal(t, "enabled", root.Thinking.Type)
+	require.NotNil(t, root.Thinking.BudgetTokens)
+	assert.Equal(t, 8192, *root.Thinking.BudgetTokens)
 	assert.Equal(t, []string{"Read", "Write", "Edit", "Bash"}, root.Tools)
 	require.Len(t, root.Skills, 1)
 	assert.Equal(t, "code-review", root.Skills[0].Name)
@@ -2046,6 +2053,8 @@ func TestCreateAgentRequest_Validate_GlobalFieldOnNonRoot(t *testing.T) {
 		{"model", func(a *AgentDefinition) { a.Model = "claude-sonnet-4-6" }, "model is a runtime-global field"},
 		{"maxSessionQueries", func(a *AgentDefinition) { a.MaxSessionQueries = intPtr(5) }, "maxSessionQueries is a runtime-global field"},
 		{"permissionMode", func(a *AgentDefinition) { a.PermissionMode = "plan" }, "permissionMode is a runtime-global field"},
+		{"effort", func(a *AgentDefinition) { a.Effort = "high" }, "effort is a runtime-global field"},
+		{"thinking", func(a *AgentDefinition) { a.Thinking = &ThinkingConfig{Type: "enabled"} }, "thinking is a runtime-global field"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2171,4 +2180,78 @@ func TestAgentDefinition_ExtraUserSkillDirsNotExposedInAPI(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(out), "extraUserSkillDirs")
 	assert.NotContains(t, string(out), "/app/config/skills/coder")
+}
+
+// TestCreateAgentRequest_Validate_RootEffortThinking guards issue #22: the
+// root agent may declare effort and thinking together; custom effort values
+// pass through (no enum by design — the per-model whitelist stays on the
+// caller side).
+func TestCreateAgentRequest_Validate_RootEffortThinking(t *testing.T) {
+	req := validGraphRequest()
+	req.Agents[0].Effort = "xhigh"
+	req.Agents[0].Thinking = &ThinkingConfig{Type: "enabled", BudgetTokens: intPtr(8192)}
+	require.NoError(t, req.Validate())
+
+	req = validGraphRequest()
+	req.Agents[0].Effort = "turbo" // custom value: passthrough
+	require.NoError(t, req.Validate())
+}
+
+// TestAgentDefinition_Validate_BlankEffort guards the fail-fast contract: a
+// whitespace-only effort is garbage that would flow straight to the
+// provider. Empty string == not declared and stays valid.
+func TestAgentDefinition_Validate_BlankEffort(t *testing.T) {
+	a := AgentDefinition{Name: "coder", Description: "d"}
+	require.NoError(t, a.Validate(), "empty effort is a valid non-declaration")
+
+	a.Effort = "   "
+	err := a.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "effort must not be blank")
+}
+
+// TestThinkingConfig_Validate guards the runtime schema alignment: type is
+// the enum adaptive|enabled|disabled (an invalid value would fail the
+// runtime's whole-config Zod parse at container startup, so reject it here
+// fail-fast); budgetTokens is an unconstrained passthrough; nil is valid.
+func TestThinkingConfig_Validate(t *testing.T) {
+	var nilCfg *ThinkingConfig
+	require.NoError(t, nilCfg.Validate())
+
+	for _, typ := range []string{"adaptive", "enabled", "disabled"} {
+		require.NoError(t, (&ThinkingConfig{Type: typ}).Validate(), typ)
+	}
+
+	err := (&ThinkingConfig{Type: "always"}).Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "thinking type must be one of: adaptive, enabled, disabled")
+}
+
+// TestAgentDefinition_EffortThinkingJSONWire guards the wire shape (issue
+// #22): both fields are omitempty — a non-declaring agent never emits the
+// keys — and a declaring one uses the contract key names, with budgetTokens
+// omitted when nil.
+func TestAgentDefinition_EffortThinkingJSONWire(t *testing.T) {
+	out, err := json.Marshal(AgentDefinition{Name: "coder", Description: "d"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), `"effort"`)
+	assert.NotContains(t, string(out), `"thinking"`)
+
+	out, err = json.Marshal(AgentDefinition{
+		Name:        "coder",
+		Description: "d",
+		Effort:      "high",
+		Thinking:    &ThinkingConfig{Type: "enabled", BudgetTokens: intPtr(4096)},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `"effort":"high"`)
+	assert.Contains(t, string(out), `"thinking":{"type":"enabled","budgetTokens":4096}`)
+
+	out, err = json.Marshal(AgentDefinition{
+		Name:        "coder",
+		Description: "d",
+		Thinking:    &ThinkingConfig{Type: "adaptive"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `"thinking":{"type":"adaptive"}`)
 }

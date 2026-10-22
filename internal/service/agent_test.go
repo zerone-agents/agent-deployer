@@ -1425,3 +1425,82 @@ func TestAgentService_Create_MissingDeploymentKey_NoSideEffects(t *testing.T) {
 	require.NoError(t, rerr)
 	assert.Empty(t, entries, "no deployment directories may be created behind a validation failure")
 }
+
+// TestAgentService_Create_EffortImageGate guards the issue #22 runtime floor:
+// the effort contract key requires runtime v2.9.0+ (runtime #77 — older
+// runtimes silently strip the key, the same failure mode that gates
+// maxSessionQueries to v2.6.0). Pinned tags below v2.9.0 and unassumed
+// :latest must refuse the deployment.
+func TestAgentService_Create_EffortImageGate(t *testing.T) {
+	cases := []struct {
+		name         string
+		image        string
+		assumeLatest bool
+		wantErr      bool
+	}{
+		{"v2.6.0 rejects declared effort (cap floor is not enough)", "open-agent-runtime:v2.6.0", false, true},
+		{"v2.8.2 rejects declared effort", "open-agent-runtime:v2.8.2", false, true},
+		{"v2.9.0 accepts declared effort", "open-agent-runtime:v2.9.0", false, false},
+		{"latest rejected without assume", "open-agent-runtime:latest", false, true},
+		{"latest with assume accepts declared effort", "open-agent-runtime:latest", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeDockerClient{}
+			svc, _ := newTestService(t, fake)
+			svc.Config().RuntimeImage = tc.image
+			svc.Config().RuntimeImageAssumeLatest = tc.assumeLatest
+
+			req := validRequest()
+			req.Agents[0].Effort = "high"
+			_, _, err := svc.Create(context.Background(), req)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrRuntimeIncompatible)
+				assert.Nil(t, fake.created, "container must not be created behind the gate")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestAgentService_Create_ThinkingNoImageGate guards that thinking alone does
+// NOT raise the image floor: the runtime has supported it since v2.4.0 (the
+// base floor), so a v2.4.0-pinned image accepts a thinking-declaring graph
+// (issue #22).
+func TestAgentService_Create_ThinkingNoImageGate(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, _ := newTestService(t, fake)
+	svc.Config().RuntimeImage = "open-agent-runtime:v2.4.0"
+	svc.Config().RuntimeImageAssumeLatest = false
+
+	req := validRequest()
+	req.Agents[0].Thinking = &model.ThinkingConfig{Type: "adaptive"}
+	_, _, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+}
+
+// TestAgentService_Create_WritesEffortThinkingToYAML guards the service→
+// storage passthrough for issue #22: the root agent's effort/thinking from
+// the create request must end up in the runtime agents.yaml root entry.
+func TestAgentService_Create_WritesEffortThinkingToYAML(t *testing.T) {
+	fake := &fakeDockerClient{}
+	svc, dataDir := newTestService(t, fake)
+
+	req := validRequest()
+	req.Agents[0].Effort = "high"
+	budget := 8192
+	req.Agents[0].Thinking = &model.ThinkingConfig{Type: "enabled", BudgetTokens: &budget}
+	_, _, err := svc.Create(context.Background(), req)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dataDir, "coder", "agents", "agents.yaml"))
+	require.NoError(t, err)
+	var doc map[string]interface{}
+	require.NoError(t, yaml.Unmarshal(data, &doc))
+	entry := doc["agents"].([]interface{})[0].(map[string]interface{})
+	assert.Equal(t, "high", entry["effort"])
+	thinking := entry["thinking"].(map[string]interface{})
+	assert.Equal(t, "enabled", thinking["type"])
+	assert.Equal(t, 8192, thinking["budgetTokens"])
+}
