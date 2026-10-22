@@ -62,10 +62,19 @@ type runtimeAgentEntry struct {
 	// (runtime PR #56): without it, upgrading deployer would silently lose
 	// the session cap stored on disk. Read-only — writes always use
 	// maxSessionQueries.
-	LegacyMaxSessionTurns *int     `yaml:"maxSessionTurns,omitempty"`
-	PermissionMode        string   `yaml:"permissionMode,omitempty"`
-	AllowedTools          []string `yaml:"allowedTools,omitempty"`
-	DisallowedTools       []string `yaml:"disallowedTools,omitempty"`
+	LegacyMaxSessionTurns *int   `yaml:"maxSessionTurns,omitempty"`
+	PermissionMode        string `yaml:"permissionMode,omitempty"`
+	// Thinking/Effort (issue #22): reasoning configuration, written to the
+	// root entry only — the runtime applies them at the root level and
+	// ignores mounted children's values (same family as Model;
+	// model.CreateAgentRequest.Validate rejects non-root declarations).
+	// Field order mirrors the runtime's AgentDefinitionSchemaCore:
+	// permissionMode, thinking, effort. Both omitempty: deployments without
+	// them (all pre-issue-#22 ones) round-trip byte-identical.
+	Thinking        *model.ThinkingConfig `yaml:"thinking,omitempty"`
+	Effort          string                `yaml:"effort,omitempty"`
+	AllowedTools    []string              `yaml:"allowedTools,omitempty"`
+	DisallowedTools []string              `yaml:"disallowedTools,omitempty"`
 	// CustomTools lists verified tool file paths relative to the configDir (issue
 	// #10); each entry carries only the paths its own agent declared. The
 	// runtime resolves them itself.
@@ -171,6 +180,8 @@ func (s *AgentStorage) WriteAgentYAML(deploymentKey naming.DeploymentKey, rootAg
 			entry.Model = a.Model
 			entry.MaxSessionQueries = a.MaxSessionQueries
 			entry.PermissionMode = a.PermissionMode
+			entry.Thinking = a.Thinking
+			entry.Effort = a.Effort
 			entry.APIKey = provider.APIKey
 			entry.BaseURL = provider.BaseURL
 			entry.APIType = provider.Protocol
@@ -513,6 +524,8 @@ func (s *AgentStorage) ReadAgentYAML(deploymentKey naming.DeploymentKey) (*Agent
 			MaxTurns:          e.MaxTurns,
 			MaxSessionQueries: e.MaxSessionQueries,
 			PermissionMode:    e.PermissionMode,
+			Thinking:          e.Thinking,
+			Effort:            e.Effort,
 			Tools:             e.AllowedTools,
 			DisallowedTools:   e.DisallowedTools,
 			SettingSources:    e.SettingSources,
