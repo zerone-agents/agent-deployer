@@ -263,7 +263,11 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o agent-deployer ./cmd/server
 # Integration tests require a running Docker daemon and the runtime image
 # (open-agent-runtime:v2.4.0 by default — the graph protocol requires
 # v2.4.0+; a stand-in tag works for topology assertions) already present
-# locally. They are skipped by default and only run with the integration tag.
+# locally. Some cases pin a higher image floor: declared effort requires
+# v2.9.0+ (issue #22), so prepare both stand-in tags before the suite:
+#   docker tag nginx:alpine open-agent-runtime:v2.4.0
+#   docker tag nginx:alpine open-agent-runtime:v2.9.0
+# They are skipped by default and only run with the integration tag.
 go test -tags=integration ./tests/integration/... -v -timeout 5m
 
 # The real-runtime acceptance tests (capability isolation via the agent

@@ -11,6 +11,16 @@
 //
 // The tests are idempotent: they clean up any containers and data they create,
 // even on assertion failure (via t.Cleanup).
+//
+// Stand-in tags: the suite never pulls images, it asserts topology against
+// locally tagged stand-ins. Prepare both floors the suite pins before
+// running:
+//
+//	docker tag nginx:alpine open-agent-runtime:v2.4.0   # base graph floor
+//	docker tag nginx:alpine open-agent-runtime:v2.9.0   # issue #22: declared effort raises the floor
+//
+// A missing higher tag fails loudly at create time (the deployment is
+// refused against a non-existent image), never silently skips.
 package integration
 
 import (
